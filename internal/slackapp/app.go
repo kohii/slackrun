@@ -281,11 +281,23 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		logging.F("hasPermalink", permalink != ""),
 	)
 
+	// Inject SLACKRUN_* on top of action.env so the child has the message
+	// coordinates it needs to call back into `slackrun post|react|upload`.
+	childEnv := make(map[string]string, len(rule.Action.Env)+4)
+	for k, v := range rule.Action.Env {
+		childEnv[k] = v
+	}
+	childEnv["SLACKRUN_CHANNEL"] = ev.Channel
+	childEnv["SLACKRUN_TS"] = ev.TS
+	childEnv["SLACKRUN_THREAD_TS"] = threadTS
+	childEnv["SLACKRUN_USER"] = ev.User
+
 	handle := runner.Run(runner.Options{
-		Command: argv,
-		Cwd:     rule.Action.Cwd,
-		Env:     rule.Action.Env,
-		Timeout: timeout,
+		Command:          argv,
+		Cwd:              rule.Action.Cwd,
+		Env:              childEnv,
+		ExposeSlackToken: rule.Action.ExposeSlackToken,
+		Timeout:          timeout,
 	})
 	a.jobs.updateExec(jobID, &handle)
 	defer a.jobs.unregister(jobID)

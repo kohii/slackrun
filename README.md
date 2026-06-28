@@ -23,6 +23,23 @@ The `cwd` and `command` cannot be supplied from a Slack message — only a
 matched rule can pick them. That is the main security boundary; see
 `docs/security.md`.
 
+## Write-back from the child
+
+Rules can set `expose_slack_token: true` to forward `SLACK_BOT_TOKEN` to the
+spawned process, which can then call back:
+
+```sh
+# inside the spawned command
+slackrun post   --channel "$SLACKRUN_CHANNEL" --thread-ts "$SLACKRUN_THREAD_TS" --text "investigating…"
+slackrun react  --channel "$SLACKRUN_CHANNEL" --ts "$SLACKRUN_TS" --emoji eyes
+slackrun upload --channel "$SLACKRUN_CHANNEL" --thread-ts "$SLACKRUN_THREAD_TS" --file ./report.txt
+```
+
+`SLACKRUN_CHANNEL`, `SLACKRUN_TS`, `SLACKRUN_THREAD_TS`, `SLACKRUN_USER` are
+injected on every spawn so the child does not have to parse anything. Read
+`docs/security.md` before opting in — a child with the token can do anything
+the Bot scope allows.
+
 ## Setup
 
 ```sh

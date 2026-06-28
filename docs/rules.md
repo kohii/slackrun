@@ -25,7 +25,15 @@ rules:
       command: ["program", "arg", "{{text}}"]   # argv (no shell)
       timeout_ms: 600000          # required (milliseconds)
       env: { KEY: value }         # optional, extra env for the spawned process
+      expose_slack_token: false   # optional; opt-in to forward SLACK_BOT_TOKEN
 ```
+
+`action.env` cannot set reserved keys: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
+`ALLOWED_USER_IDS`, `SLACKRUN_CHANNEL`, `SLACKRUN_TS`, `SLACKRUN_THREAD_TS`,
+`SLACKRUN_USER`. The first three are managed by `expose_slack_token`; the
+`SLACKRUN_*` ones are injected automatically with the triggering event's
+coordinates so the child can call `slackrun post|react|upload` without
+parsing arguments.
 
 ## Matching
 

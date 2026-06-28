@@ -16,10 +16,17 @@ var Version = "dev"
 
 const usage = `slackrun — dispatch Slack events to local commands
 
-Usage:
+Dispatch:
   slackrun start [<rules.yaml>]                 Run the bot
   slackrun check <rules.yaml>                   Validate the rules file
   slackrun dry-run <rules.yaml> --event <file>  Show what would match (no spawn)
+
+Write (called from spawned children; requires expose_slack_token: true on the rule):
+  slackrun post   --channel C... [--thread-ts T] --text TEXT      (use --text - to read stdin)
+  slackrun react  --channel C... --ts T --emoji NAME
+  slackrun upload --channel C... [--thread-ts T] --file PATH [--title T] [--initial-comment T]
+
+Misc:
   slackrun version                              Print version
 `
 
@@ -35,6 +42,12 @@ func main() {
 		os.Exit(cli.RunCheck(os.Args[2:], os.Stdout, os.Stderr))
 	case "dry-run":
 		os.Exit(cli.RunDryRun(os.Args[2:], os.Stdout, os.Stderr))
+	case "post":
+		os.Exit(cli.RunPost(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	case "react":
+		os.Exit(cli.RunReact(os.Args[2:], os.Stdout, os.Stderr))
+	case "upload":
+		os.Exit(cli.RunUpload(os.Args[2:], os.Stdout, os.Stderr))
 	case "version", "--version", "-v":
 		fmt.Println(Version)
 	case "help", "--help", "-h":

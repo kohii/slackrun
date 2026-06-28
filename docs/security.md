@@ -51,11 +51,42 @@ A boot self-check verifies each pattern still strips a representative fixture
 (`util.RunRedactSelfCheck`). Failures are logged but the bot keeps running so
 missing masks do not block real alerts.
 
+## Write CLI: `slackrun post|react|upload`
+
+When a rule sets `expose_slack_token: true`, the spawned child receives
+`SLACK_BOT_TOKEN` and can call back into slackrun (`slackrun post ...`,
+`slackrun react ...`, `slackrun upload ...`) or — equivalently — call the
+Slack API directly with `curl`. **The CLI's PII redaction and operation
+allow-list are conveniences, not enforced boundaries.** Anything the child
+can do with the token, slackrun can't prevent.
+
+In practice that means: a child with `expose_slack_token: true` is a
+**trusted child holding the full Bot scope**. Use the rule's `cwd` and the
+program's own permissions (e.g. Claude Code's `.claude/settings.json`) to
+limit what it can actually do.
+
+Sanitisation that *is* applied when the child calls slackrun's CLI:
+
+| Subcommand | Sanitised fields |
+|---|---|
+| `post`   | `--text` body |
+| `upload` | `--file` content, `--title`, `--initial-comment`, the filename Slack displays |
+| `react`  | nothing — emoji name and Slack IDs only, no free-form input |
+
+slackrun also injects four read-only vars into the child's env so the CLI
+calls can reference the triggering event without parsing rules:
+
+- `SLACKRUN_CHANNEL`
+- `SLACKRUN_TS`
+- `SLACKRUN_THREAD_TS`
+- `SLACKRUN_USER`
+
 ## Child environment
 
-`os.Environ()` flows to the child by default, so any secret that landed in the
-parent process (via `.env` or otherwise) used to reach the spawned command.
-slackrun now filters that pass-through:
+godotenv loads `.env` into the parent process's environment at startup, so
+`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `ALLOWED_USER_IDS` are visible to
+slackrun itself. `os.Environ()` would otherwise flow straight to the
+spawned command; slackrun now filters that pass-through:
 
 | Variable | Default child visibility |
 |---|---|

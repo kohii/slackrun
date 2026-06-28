@@ -60,6 +60,10 @@ const defaultSigKillGrace = 5 * time.Second
 
 // Run spawns the configured command and returns a Handle the caller can wait
 // on. The returned channel is buffered; the caller never blocks the runner.
+//
+// Caller responsibility: `SLACKRUN_*` keys in opts.Env are injected verbatim
+// (they describe the triggering event). slackapp populates them; if you call
+// Run from somewhere else, set them yourself or omit them.
 func Run(opts Options) Handle {
 	done := make(chan Result, 1)
 
@@ -164,27 +168,35 @@ func Run(opts Options) Handle {
 	return Handle{Done: done, Kill: sendKill}
 }
 
-// ProtectedEnvKeys are env vars the child must never inherit by accident.
-// `SLACK_BOT_TOKEN` is allowed only when Options.ExposeSlackToken is set.
-// Others (`SLACK_APP_TOKEN`, `ALLOWED_USER_IDS`) have no child use case.
-// `SLACKRUN_*` slots are reserved for variables slackrun itself injects
-// (channel/ts/...); allowing a rule to shadow them would lie to the child.
-var protectedEnvKeys = map[string]struct{}{
-	"SLACK_APP_TOKEN":     {},
-	"ALLOWED_USER_IDS":    {},
-	"SLACKRUN_CHANNEL":    {},
-	"SLACKRUN_TS":         {},
-	"SLACKRUN_THREAD_TS":  {},
-	"SLACKRUN_USER":       {},
+// alwaysStripFromOverride lists env keys that are *secrets* — they must never
+// be supplied by a rule. `SLACK_BOT_TOKEN` is the opt-in case (gated by
+// Options.ExposeSlackToken from the parent env), `SLACK_APP_TOKEN` and
+// `ALLOWED_USER_IDS` have no legitimate child use.
+var alwaysStripFromOverride = map[string]struct{}{
+	"SLACK_BOT_TOKEN":  {},
+	"SLACK_APP_TOKEN":  {},
+	"ALLOWED_USER_IDS": {},
 }
 
-// IsProtectedEnvKey reports whether `key` is reserved by slackrun. Used by
-// rules validation to reject `action.env` entries that would silently lose.
+// slackrunReservedKeys are vars slackrun injects on every spawn. Rules cannot
+// shadow them via `action.env` (would lie to the child about the triggering
+// event), but slackrun itself populates them through Options.Env.
+var slackrunReservedKeys = map[string]struct{}{
+	"SLACKRUN_CHANNEL":   {},
+	"SLACKRUN_TS":        {},
+	"SLACKRUN_THREAD_TS": {},
+	"SLACKRUN_USER":      {},
+}
+
+// IsProtectedEnvKey reports whether `key` is reserved by slackrun, so the
+// rules loader can reject `action.env` entries that would silently lose.
+// runner.buildEnv applies looser rules at runtime (trusts the caller of
+// runner.Run to have validated).
 func IsProtectedEnvKey(key string) bool {
-	if key == "SLACK_BOT_TOKEN" {
+	if _, ok := alwaysStripFromOverride[key]; ok {
 		return true
 	}
-	_, ok := protectedEnvKeys[key]
+	_, ok := slackrunReservedKeys[key]
 	return ok
 }
 
@@ -204,7 +216,7 @@ func buildEnv(overrides map[string]string, exposeSlackToken bool) []string {
 			}
 			continue
 		}
-		if _, p := protectedEnvKeys[key]; p {
+		if key == "SLACK_APP_TOKEN" || key == "ALLOWED_USER_IDS" {
 			continue
 		}
 		filtered = append(filtered, kv)
@@ -221,10 +233,10 @@ func buildEnv(overrides map[string]string, exposeSlackToken bool) []string {
 	out := make([]string, len(filtered), len(filtered)+len(overrides))
 	copy(out, filtered)
 	for k, v := range overrides {
-		// Final strip: overrides cannot reintroduce protected keys. Rules
-		// validation rejects them up front, but defending here protects
-		// callers (incl. tests) that construct Options directly.
-		if IsProtectedEnvKey(k) {
+		// Defence-in-depth: never let an override smuggle a parent secret back
+		// in. SLACKRUN_* keys are legitimate system injections, so the
+		// reserved-key check is rules-only, not here.
+		if _, banned := alwaysStripFromOverride[k]; banned {
 			continue
 		}
 		entry := k + "=" + v
