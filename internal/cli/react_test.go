@@ -62,6 +62,21 @@ func TestRunReact_RequiredFlags(t *testing.T) {
 	}
 }
 
+func TestRunReact_ChannelAndTSFromEnv(t *testing.T) {
+	t.Setenv("SLACKRUN_CHANNEL", "C01ENV")
+	t.Setenv("SLACKRUN_TS", "9999.0001")
+
+	fake := &fakeReacter{}
+	var stdout, stderr bytes.Buffer
+	code := runReactWith([]string{"--emoji", "eyes"}, &stdout, &stderr, fake)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if fake.lastItem.Channel != "C01ENV" || fake.lastItem.Timestamp != "9999.0001" {
+		t.Fatalf("item=%+v", fake.lastItem)
+	}
+}
+
 func TestRunReact_APIErrorExits1(t *testing.T) {
 	t.Parallel()
 	fake := &fakeReacter{returnErr: errors.New("already_reacted")}

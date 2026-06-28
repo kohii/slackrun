@@ -22,9 +22,11 @@ Dispatch:
   slackrun dry-run <rules.yaml> --event <file>  Show what would match (no spawn)
 
 Write (called from spawned children; requires expose_slack_token: true on the rule):
-  slackrun post   --channel C... [--thread-ts T] --text TEXT      (use --text - to read stdin)
-  slackrun react  --channel C... --ts T --emoji NAME
-  slackrun upload --channel C... [--thread-ts T] --file PATH [--title T] [--initial-comment T]
+  slackrun post   [--channel C...] [--thread-ts T] --text TEXT    (--text - reads stdin)
+  slackrun react  [--channel C...] [--ts T] --emoji NAME
+  slackrun upload [--channel C...] [--thread-ts T] --file PATH [--title T] [--initial-comment T]
+  Channel/ts/thread_ts default to SLACKRUN_CHANNEL / SLACKRUN_TS / SLACKRUN_THREAD_TS,
+  which slackrun injects on every spawn.
 
 Misc:
   slackrun version                              Print version

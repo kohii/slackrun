@@ -188,6 +188,25 @@ func TestRunUpload_RejectsBinaryFile(t *testing.T) {
 	}
 }
 
+func TestRunUpload_ChannelAndThreadFromEnv(t *testing.T) {
+	t.Setenv("SLACKRUN_CHANNEL", "C01ENV")
+	t.Setenv("SLACKRUN_THREAD_TS", "9999.0001")
+
+	path := writeTempFile(t, []byte("hi"))
+	fake := &fakeUploader{}
+	var stdout, stderr bytes.Buffer
+	code := runUploadWith([]string{"--file", path}, &stdout, &stderr, fake)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if fake.completeParams.Channel != "C01ENV" {
+		t.Fatalf("channel=%q", fake.completeParams.Channel)
+	}
+	if fake.completeParams.ThreadTimestamp != "9999.0001" {
+		t.Fatalf("thread_ts=%q", fake.completeParams.ThreadTimestamp)
+	}
+}
+
 func TestRunUpload_RequiredFlags(t *testing.T) {
 	t.Parallel()
 	cases := [][]string{

@@ -29,16 +29,17 @@ Rules can set `expose_slack_token: true` to forward `SLACK_BOT_TOKEN` to the
 spawned process, which can then call back:
 
 ```sh
-# inside the spawned command
-slackrun post   --channel "$SLACKRUN_CHANNEL" --thread-ts "$SLACKRUN_THREAD_TS" --text "investigating…"
-slackrun react  --channel "$SLACKRUN_CHANNEL" --ts "$SLACKRUN_TS" --emoji eyes
-slackrun upload --channel "$SLACKRUN_CHANNEL" --thread-ts "$SLACKRUN_THREAD_TS" --file ./report.txt
+# inside the spawned command — channel / ts / thread_ts default to the
+# SLACKRUN_* env vars slackrun injects, so the short form just works:
+slackrun post   --text "investigating…"
+slackrun react  --emoji eyes
+slackrun upload --file ./report.txt
 ```
 
 `SLACKRUN_CHANNEL`, `SLACKRUN_TS`, `SLACKRUN_THREAD_TS`, `SLACKRUN_USER` are
-injected on every spawn so the child does not have to parse anything. Read
-`docs/security.md` before opting in — a child with the token can do anything
-the Bot scope allows.
+injected on every spawn. Pass `--channel` / `--ts` / `--thread-ts` explicitly
+to target a different message. Read `docs/security.md` before opting in — a
+child with the token can do anything the Bot scope allows.
 
 ## Setup
 

@@ -44,10 +44,12 @@ func runPostWith(args []string, stdin io.Reader, stdout, stderr io.Writer, clien
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *channel == "" {
-		fmt.Fprintln(stderr, "--channel is required")
+	chanID := resolveFromEnv(*channel, "SLACKRUN_CHANNEL")
+	if chanID == "" {
+		fmt.Fprintln(stderr, "--channel is required (or set SLACKRUN_CHANNEL)")
 		return 2
 	}
+	threadID := resolveFromEnv(*threadTS, "SLACKRUN_THREAD_TS")
 	body := *text
 	if body == "-" {
 		buf, err := io.ReadAll(stdin)
@@ -66,13 +68,13 @@ func runPostWith(args []string, stdin io.Reader, stdout, stderr io.Writer, clien
 	}
 
 	opts := []slack.MsgOption{slack.MsgOptionText(body, false)}
-	if *threadTS != "" {
-		opts = append(opts, slack.MsgOptionTS(*threadTS))
+	if threadID != "" {
+		opts = append(opts, slack.MsgOptionTS(threadID))
 	}
 	if *disableMarkdown {
 		opts = append(opts, slack.MsgOptionDisableMarkdown())
 	}
-	ch, ts, err := client.PostMessage(*channel, opts...)
+	ch, ts, err := client.PostMessage(chanID, opts...)
 	if err != nil {
 		fmt.Fprintln(stderr, "post failed:", err)
 		return 1

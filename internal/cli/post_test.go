@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -73,11 +74,57 @@ func TestRunPost_ReadsStdinWhenTextDashed(t *testing.T) {
 }
 
 func TestRunPost_MissingChannelIsUsageError(t *testing.T) {
-	t.Parallel()
+	// Both flag and SLACKRUN_CHANNEL absent → usage error.
+	t.Setenv("SLACKRUN_CHANNEL", "")
+	os.Unsetenv("SLACKRUN_CHANNEL")
+
 	var stdout, stderr bytes.Buffer
 	code := runPostWith([]string{"--text", "hi"}, strings.NewReader(""), &stdout, &stderr, &fakePoster{})
 	if code != 2 {
 		t.Fatalf("expected 2, got %d", code)
+	}
+}
+
+func TestRunPost_ChannelAndThreadFromEnv(t *testing.T) {
+	// `slackrun start` injects these on every spawn. The CLI must accept
+	// them as fallbacks when --channel / --thread-ts are omitted.
+	t.Setenv("SLACKRUN_CHANNEL", "C01ENV")
+	t.Setenv("SLACKRUN_THREAD_TS", "9999.0001")
+
+	fake := &fakePoster{}
+	var stdout, stderr bytes.Buffer
+	code := runPostWith([]string{"--text", "hi"}, strings.NewReader(""), &stdout, &stderr, fake)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if fake.lastChannel != "C01ENV" {
+		t.Fatalf("channel=%q", fake.lastChannel)
+	}
+	_, values, err := slack.UnsafeApplyMsgOptions("token", fake.lastChannel, "https://slack.com/api/", fake.lastOptions...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values.Get("thread_ts") != "9999.0001" {
+		t.Fatalf("thread_ts=%q", values.Get("thread_ts"))
+	}
+}
+
+func TestRunPost_FlagOverridesEnv(t *testing.T) {
+	t.Setenv("SLACKRUN_CHANNEL", "C01ENV")
+	t.Setenv("SLACKRUN_THREAD_TS", "9999.0001")
+
+	fake := &fakePoster{}
+	var stdout, stderr bytes.Buffer
+	code := runPostWith(
+		[]string{"--channel", "C01FLAG", "--thread-ts", "1.1", "--text", "hi"},
+		strings.NewReader(""),
+		&stdout, &stderr, fake,
+	)
+	if code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	if fake.lastChannel != "C01FLAG" {
+		t.Fatalf("flag should win: %q", fake.lastChannel)
 	}
 }
 

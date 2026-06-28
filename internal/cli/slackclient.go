@@ -7,6 +7,17 @@ import (
 	"github.com/slack-go/slack"
 )
 
+// resolveFromEnv returns `flagVal` when set; otherwise the value of envKey.
+// Used by post/react/upload so children invoked by slackrun can omit
+// --channel / --ts / --thread-ts and pick up the triggering event from the
+// SLACKRUN_* env vars slackrun injects.
+func resolveFromEnv(flagVal, envKey string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return os.Getenv(envKey)
+}
+
 // errNoSlackToken is what every write subcommand returns when the child was
 // not given a token. The wording points the user at the rules-level opt-in.
 var errNoSlackToken = errors.New(

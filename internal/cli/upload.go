@@ -55,9 +55,11 @@ func runUploadWith(args []string, stdout, stderr io.Writer, client Uploader) int
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	chanID := resolveFromEnv(*channel, "SLACKRUN_CHANNEL")
+	threadID := resolveFromEnv(*threadTS, "SLACKRUN_THREAD_TS")
 	switch {
-	case *channel == "":
-		fmt.Fprintln(stderr, "--channel is required")
+	case chanID == "":
+		fmt.Fprintln(stderr, "--channel is required (or set SLACKRUN_CHANNEL)")
 		return 2
 	case *filePath == "":
 		fmt.Fprintln(stderr, "--file is required")
@@ -106,8 +108,8 @@ func runUploadWith(args []string, stdout, stderr io.Writer, client Uploader) int
 	}
 	resp, err := client.CompleteUploadExternalContext(ctx, slack.CompleteUploadExternalParameters{
 		Files:           []slack.FileSummary{file},
-		Channel:         *channel,
-		ThreadTimestamp: *threadTS,
+		Channel:         chanID,
+		ThreadTimestamp: threadID,
 		InitialComment:  cleanComment,
 	})
 	if err != nil {

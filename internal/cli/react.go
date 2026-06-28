@@ -39,12 +39,14 @@ func runReactWith(args []string, stdout, stderr io.Writer, client Reacter) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	chanID := resolveFromEnv(*channel, "SLACKRUN_CHANNEL")
+	tsID := resolveFromEnv(*ts, "SLACKRUN_TS")
 	switch {
-	case *channel == "":
-		fmt.Fprintln(stderr, "--channel is required")
+	case chanID == "":
+		fmt.Fprintln(stderr, "--channel is required (or set SLACKRUN_CHANNEL)")
 		return 2
-	case *ts == "":
-		fmt.Fprintln(stderr, "--ts is required")
+	case tsID == "":
+		fmt.Fprintln(stderr, "--ts is required (or set SLACKRUN_TS)")
 		return 2
 	case *emoji == "":
 		fmt.Fprintln(stderr, "--emoji is required")
@@ -61,7 +63,7 @@ func runReactWith(args []string, stdout, stderr io.Writer, client Reacter) int {
 		fmt.Fprintln(stderr, "--emoji must not contain ':'")
 		return 2
 	}
-	if err := client.AddReaction(name, slack.ItemRef{Channel: *channel, Timestamp: *ts}); err != nil {
+	if err := client.AddReaction(name, slack.ItemRef{Channel: chanID, Timestamp: tsID}); err != nil {
 		fmt.Fprintln(stderr, "react failed:", err)
 		return 1
 	}
