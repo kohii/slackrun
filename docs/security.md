@@ -51,6 +51,20 @@ A boot self-check verifies each pattern still strips a representative fixture
 (`util.RunRedactSelfCheck`). Failures are logged but the bot keeps running so
 missing masks do not block real alerts.
 
+## Dedupe and boot-time replay
+
+`Dedupe` rejects events older than `bootTime - MIN_EVENT_AGE_MS_AT_BOOT` so a
+Socket Mode reconnect after a long downtime does not flood live channels with
+hours-old alerts. After that startup window the TTL map alone catches
+duplicates.
+
+The cutoff is a static timestamp computed once at boot. An event whose Slack
+`ts` lands on either side of it within the same restart will be processed —
+duplicate handling falls back to the TTL map. In practice the only way to
+trigger duplicate-and-not-caught behaviour is a restart that lasts longer than
+the TTL window plus the boot cutoff, which is well outside normal operation.
+Tune `MIN_EVENT_AGE_MS_AT_BOOT` if you care.
+
 ## `.env` and rotation
 
 - File lives at `~/.config/slackrun/.env`. `setup-launchagent.sh` enforces

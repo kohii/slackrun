@@ -81,7 +81,10 @@ var allowedMessageSubtypes = map[string]bool{
 // W-prefix covers enterprise grid users.
 var mentionRe = regexp.MustCompile(`<@[UW][A-Z0-9]+(?:\|[^>]+)?>`)
 
-var whitespaceCollapse = regexp.MustCompile(`\s+`)
+// whitespaceCollapse matches runs of whitespace, including Unicode space
+// separators like full-width space (U+3000) and NBSP (U+00A0) that Slack
+// clients sometimes insert. Go's `\s` is ASCII-only.
+var whitespaceCollapse = regexp.MustCompile(`[\s\p{Zs}]+`)
 
 // ExtractText pulls the most-specific text field, accounting for subtype
 // nesting (message_replied wraps the original in .message).
@@ -97,7 +100,9 @@ func ExtractText(ev IncomingEvent) string {
 // and the rest.
 func NormalizeMentionText(raw string) (text, firstToken, rest string) {
 	cleaned := mentionRe.ReplaceAllString(raw, "")
-	cleaned = strings.TrimSpace(whitespaceCollapse.ReplaceAllString(cleaned, " "))
+	// Collapse on Unicode whitespace too, then split on the single ASCII space
+	// the collapse produces.
+	cleaned = strings.Trim(whitespaceCollapse.ReplaceAllString(cleaned, " "), " ")
 	if cleaned == "" {
 		return "", "", ""
 	}

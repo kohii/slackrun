@@ -175,6 +175,9 @@ func TestNormalizeMentionText(t *testing.T) {
 		{"<@U01BOT|kohii-ai> henry", "henry", "henry", ""},
 		{"  <@U01BOT>   spaced   args  ", "spaced args", "spaced", "args"},
 		{"<@U01BOT>", "", "", ""},
+		// Slack mobile sometimes inserts U+00A0 (NBSP) or U+3000 (full-width
+		// space) around mentions; ASCII `\s` would miss them.
+		{"<@U01BOT> henry　build", "henry build", "henry", "build"},
 	}
 	for _, c := range cases {
 		text, tok, rest := NormalizeMentionText(c.in)
