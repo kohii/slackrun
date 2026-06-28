@@ -51,6 +51,24 @@ A boot self-check verifies each pattern still strips a representative fixture
 (`util.RunRedactSelfCheck`). Failures are logged but the bot keeps running so
 missing masks do not block real alerts.
 
+## Child environment
+
+`os.Environ()` flows to the child by default, so any secret that landed in the
+parent process (via `.env` or otherwise) used to reach the spawned command.
+slackrun now filters that pass-through:
+
+| Variable | Default child visibility |
+|---|---|
+| `SLACK_BOT_TOKEN` | hidden — set `expose_slack_token: true` on the rule to opt in |
+| `SLACK_APP_TOKEN` | always stripped (Socket Mode is the parent's job) |
+| `ALLOWED_USER_IDS` | always stripped (authorization happens in the parent) |
+| Everything else | passed through unchanged |
+
+`action.env` can override any non-reserved variable. Writing a reserved key
+(`SLACK_*`, `ALLOWED_USER_IDS`, `SLACKRUN_*`) into `action.env` is rejected at
+load time; even if a caller smuggles one through `runner.Options.Env`, the
+final strip pass in `buildEnv` drops it.
+
 ## Dedupe and boot-time replay
 
 `Dedupe` rejects events older than `bootTime - MIN_EVENT_AGE_MS_AT_BOOT` so a

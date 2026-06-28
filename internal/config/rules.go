@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/kohii/slackrun/internal/runner"
 	"gopkg.in/yaml.v3"
 )
 
@@ -97,6 +98,11 @@ type Action struct {
 	TimeoutMs int               `yaml:"timeout_ms"`
 	Env       map[string]string `yaml:"env,omitempty"`
 	Label     string            `yaml:"label,omitempty"`
+	// ExposeSlackToken passes SLACK_BOT_TOKEN to the spawned child so it can
+	// call `slackrun post|react|upload`. Default false; opt-in per rule so
+	// `rules.yaml` is the single place to audit which children get token
+	// access.
+	ExposeSlackToken bool `yaml:"expose_slack_token,omitempty"`
 }
 
 // Rule is the on-disk unit slackrun matches events against. Order matters:
@@ -335,6 +341,9 @@ func validateRule(r Rule) []ValidationIssue {
 	for k := range r.Action.Env {
 		if !envVarNameRe.MatchString(k) {
 			add(IssueError, fmt.Sprintf("action.env key %q is not a valid env var name", k))
+		}
+		if runner.IsProtectedEnvKey(k) {
+			add(IssueError, fmt.Sprintf("action.env key %q is reserved (slackrun manages it; use expose_slack_token for SLACK_BOT_TOKEN)", k))
 		}
 	}
 

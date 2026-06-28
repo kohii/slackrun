@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -113,5 +114,99 @@ func TestRun_EmptyArgvIsError(t *testing.T) {
 	res := <-h.Done
 	if res.StartErr == nil {
 		t.Fatal("expected StartErr")
+	}
+}
+
+func TestRun_StripsProtectedParentEnv(t *testing.T) {
+	// Parent SLACK_* / ALLOWED_USER_IDS must never reach the child unless
+	// ExposeSlackToken opts in (and even then only SLACK_BOT_TOKEN).
+	t.Setenv("SLACK_BOT_TOKEN", "xoxb-parent-secret")
+	t.Setenv("SLACK_APP_TOKEN", "xapp-parent-secret")
+	t.Setenv("ALLOWED_USER_IDS", "U01PARENT")
+
+	h := Run(Options{
+		Command: []string{"sh", "-c",
+			`printf "BOT=%s\nAPP=%s\nALLOW=%s\n" "${SLACK_BOT_TOKEN-unset}" "${SLACK_APP_TOKEN-unset}" "${ALLOWED_USER_IDS-unset}"`},
+		Cwd:     "/tmp",
+		Timeout: 5 * time.Second,
+	})
+	res := <-h.Done
+	if res.ExitCode != 0 {
+		t.Fatalf("exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "BOT=unset") {
+		t.Fatalf("SLACK_BOT_TOKEN leaked: %q", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "APP=unset") {
+		t.Fatalf("SLACK_APP_TOKEN leaked: %q", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "ALLOW=unset") {
+		t.Fatalf("ALLOWED_USER_IDS leaked: %q", res.Stdout)
+	}
+}
+
+func TestRun_ExposeSlackTokenPasses(t *testing.T) {
+	t.Setenv("SLACK_BOT_TOKEN", "xoxb-parent-secret")
+	t.Setenv("SLACK_APP_TOKEN", "xapp-parent-secret")
+
+	h := Run(Options{
+		Command:          []string{"sh", "-c", `printf "%s|%s" "${SLACK_BOT_TOKEN-unset}" "${SLACK_APP_TOKEN-unset}"`},
+		Cwd:              "/tmp",
+		ExposeSlackToken: true,
+		Timeout:          5 * time.Second,
+	})
+	res := <-h.Done
+	if res.ExitCode != 0 {
+		t.Fatalf("exit=%d", res.ExitCode)
+	}
+	if res.Stdout != "xoxb-parent-secret|unset" {
+		t.Fatalf("got %q", res.Stdout)
+	}
+}
+
+func TestRun_OverridesCannotReintroduceProtectedKeys(t *testing.T) {
+	// Even if a caller smuggles a protected key through Options.Env, buildEnv
+	// must drop it on the final strip pass.
+	t.Setenv("SLACK_BOT_TOKEN", "")
+	os.Unsetenv("SLACK_BOT_TOKEN")
+
+	h := Run(Options{
+		Command: []string{"sh", "-c", `printf "%s|%s" "${SLACK_BOT_TOKEN-unset}" "${ALLOWED_USER_IDS-unset}"`},
+		Cwd:     "/tmp",
+		Env: map[string]string{
+			"SLACK_BOT_TOKEN":  "xoxb-from-rule",
+			"ALLOWED_USER_IDS": "U01RULE",
+		},
+		Timeout: 5 * time.Second,
+	})
+	res := <-h.Done
+	if res.ExitCode != 0 {
+		t.Fatalf("exit=%d stderr=%q", res.ExitCode, res.Stderr)
+	}
+	if res.Stdout != "unset|unset" {
+		t.Fatalf("override leaked protected keys: %q", res.Stdout)
+	}
+}
+
+func TestIsProtectedEnvKey(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"SLACK_BOT_TOKEN":    true,
+		"SLACK_APP_TOKEN":    true,
+		"ALLOWED_USER_IDS":   true,
+		"SLACKRUN_CHANNEL":   true,
+		"SLACKRUN_TS":        true,
+		"SLACKRUN_THREAD_TS": true,
+		"SLACKRUN_USER":      true,
+		"PATH":               false,
+		"HOME":               false,
+		"MY_VAR":             false,
+		"SLACK_OTHER":        false,
+		"SLACKRUN_OTHER":     false,
+	}
+	for k, want := range cases {
+		if got := IsProtectedEnvKey(k); got != want {
+			t.Errorf("IsProtectedEnvKey(%q) = %v, want %v", k, got, want)
+		}
 	}
 }

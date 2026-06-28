@@ -236,3 +236,53 @@ func hasIssue(issues []ValidationIssue, needle string) bool {
 	}
 	return false
 }
+
+func TestValidate_RejectsProtectedActionEnv(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "ALLOWED_USER_IDS",
+		"SLACKRUN_CHANNEL", "SLACKRUN_TS", "SLACKRUN_THREAD_TS", "SLACKRUN_USER",
+	}
+	for _, key := range cases {
+		key := key
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      env:
+        ` + key + `: "x"
+`
+			res := parseAndValidate(t, src)
+			if !hasIssue(res.Issues, "is reserved") {
+				t.Fatalf("missing reserved-env error for %s: %+v", key, res.Issues)
+			}
+		})
+	}
+}
+
+func TestValidate_AllowsExposeSlackToken(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      expose_slack_token: true
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %+v", res.Issues)
+	}
+	if !res.Rules[0].Action.ExposeSlackToken {
+		t.Fatal("expose_slack_token should be true")
+	}
+}

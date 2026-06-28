@@ -35,9 +35,13 @@ type Options struct {
 	Command []string
 	// Cwd is the working directory; required, absolute.
 	Cwd string
-	// Env overrides specific variables on top of the parent process env. The
-	// child sees both unless a key in Env shadows a parent value.
+	// Env overrides specific variables on top of the (filtered) parent process
+	// env. See buildEnv for the protected-key list that overrides cannot
+	// reintroduce.
 	Env map[string]string
+	// ExposeSlackToken passes SLACK_BOT_TOKEN through to the child. Without it
+	// the child cannot call `slackrun post|react|upload`. Default false.
+	ExposeSlackToken bool
 	// Timeout fires the SIGTERM → SIGKILL (5s) sequence.
 	Timeout time.Duration
 	// SigKillGrace overrides the default 5s grace between SIGTERM and SIGKILL.
@@ -73,7 +77,7 @@ func Run(opts Options) Handle {
 	// stdlib's CommandContext jumps straight to SIGKILL on context cancel.
 	cmd := exec.Command(opts.Command[0], opts.Command[1:]...)
 	cmd.Dir = opts.Cwd
-	cmd.Env = buildEnv(opts.Env)
+	cmd.Env = buildEnv(opts.Env, opts.ExposeSlackToken)
 	// Detach into its own process group so signals reach the whole tree
 	// (matters when the user wraps things in `sh -c`).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -160,21 +164,69 @@ func Run(opts Options) Handle {
 	return Handle{Done: done, Kill: sendKill}
 }
 
-func buildEnv(overrides map[string]string) []string {
-	parent := os.Environ()
-	if len(overrides) == 0 {
-		return parent
+// ProtectedEnvKeys are env vars the child must never inherit by accident.
+// `SLACK_BOT_TOKEN` is allowed only when Options.ExposeSlackToken is set.
+// Others (`SLACK_APP_TOKEN`, `ALLOWED_USER_IDS`) have no child use case.
+// `SLACKRUN_*` slots are reserved for variables slackrun itself injects
+// (channel/ts/...); allowing a rule to shadow them would lie to the child.
+var protectedEnvKeys = map[string]struct{}{
+	"SLACK_APP_TOKEN":     {},
+	"ALLOWED_USER_IDS":    {},
+	"SLACKRUN_CHANNEL":    {},
+	"SLACKRUN_TS":         {},
+	"SLACKRUN_THREAD_TS":  {},
+	"SLACKRUN_USER":       {},
+}
+
+// IsProtectedEnvKey reports whether `key` is reserved by slackrun. Used by
+// rules validation to reject `action.env` entries that would silently lose.
+func IsProtectedEnvKey(key string) bool {
+	if key == "SLACK_BOT_TOKEN" {
+		return true
 	}
-	// Build a map for quick override.
-	idx := make(map[string]int, len(parent))
-	for i, kv := range parent {
+	_, ok := protectedEnvKeys[key]
+	return ok
+}
+
+func buildEnv(overrides map[string]string, exposeSlackToken bool) []string {
+	parent := os.Environ()
+	filtered := make([]string, 0, len(parent))
+	for _, kv := range parent {
+		eq := indexEq(kv)
+		if eq < 0 {
+			filtered = append(filtered, kv)
+			continue
+		}
+		key := kv[:eq]
+		if key == "SLACK_BOT_TOKEN" {
+			if exposeSlackToken {
+				filtered = append(filtered, kv)
+			}
+			continue
+		}
+		if _, p := protectedEnvKeys[key]; p {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	if len(overrides) == 0 {
+		return filtered
+	}
+	idx := make(map[string]int, len(filtered))
+	for i, kv := range filtered {
 		if eq := indexEq(kv); eq >= 0 {
 			idx[kv[:eq]] = i
 		}
 	}
-	out := make([]string, len(parent), len(parent)+len(overrides))
-	copy(out, parent)
+	out := make([]string, len(filtered), len(filtered)+len(overrides))
+	copy(out, filtered)
 	for k, v := range overrides {
+		// Final strip: overrides cannot reintroduce protected keys. Rules
+		// validation rejects them up front, but defending here protects
+		// callers (incl. tests) that construct Options directly.
+		if IsProtectedEnvKey(k) {
+			continue
+		}
 		entry := k + "=" + v
 		if i, ok := idx[k]; ok {
 			out[i] = entry
