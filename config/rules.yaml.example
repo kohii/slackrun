@@ -1,0 +1,50 @@
+# slackrun rules. Production location: ~/.config/slackrun/rules.yaml
+# Validate with `slackrun check <path>` before deploying.
+#
+# Matching order: top-to-bottom, first match wins.
+# `app_mention` events match only `type: app_mention` rules;
+# `message` events match only `type: message` rules.
+# `type: message` requires `trigger.from` so unknown senders cannot trigger spawns.
+#
+# Template variables available in `action.command`:
+#   {{permalink}}  Slack permalink for the triggering message
+#   {{text}}       message text (mentions stripped for app_mention)
+#   {{rest}}       text minus the matched keyword (mentions only)
+#   {{channel}}    Slack channel ID
+#   {{user}}       Slack user ID of the event author
+
+rules:
+  # 1. Sentry alerts in #alert → run a Claude skill against your workspace.
+  - name: sentry-alert
+    description: "Sentry notifications posted to #alert"
+    trigger:
+      type: message
+      channel: C0123456789                # replace with #alert channel ID
+      from:
+        bot_user_ids: [UXXXSENTRYXXX]     # Sentry official app (if used)
+        app_ids: [AXXXSENTRYXXX]          # Incoming Webhook app (if used)
+        usernames: ["Sentry"]
+    action:
+      cwd: /path/to/your/workspace        # replace with an absolute path
+      command: ["claude", "-p", "/alert-handling {{permalink}}"]
+      timeout_ms: 1200000
+
+  # 2. @your-bot henry … → run Claude in the henry workspace.
+  - name: mention-henry
+    description: "@your-bot henry <prompt> → henry workspace"
+    trigger:
+      type: app_mention
+      keyword: henry
+    action:
+      cwd: /path/to/your/workspace
+      command: ["claude", "-p", "{{rest}}"]
+      timeout_ms: 900000
+
+  # 3. Default mention (no keyword) → drop into your home dir.
+  - name: mention-default
+    trigger:
+      type: app_mention
+    action:
+      cwd: /Users/your-username           # replace with an absolute path
+      command: ["claude", "-p", "{{text}}"]
+      timeout_ms: 900000

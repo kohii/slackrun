@@ -1,0 +1,16 @@
+/slackrun
+/bin/
+/dist/
+*.test
+*.out
+coverage.txt
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# local config (should live under ~/.config/slackrun/)
+.env
+.env.*
+!.env.example
