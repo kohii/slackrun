@@ -445,6 +445,37 @@ rules:
 	}
 }
 
+func TestValidate_ExcludeTriggeringMessage_WithFallbackEventWarns(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        parts:
+          - slack_thread:
+              exclude_triggering_message: true
+              on_fetch_error: fallback_event
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("expected warn, not error: %+v", res.Issues)
+	}
+	var sawWarn bool
+	for _, i := range res.Issues {
+		if i.Level == IssueWarn && strings.Contains(i.Message, "empty fallback") {
+			sawWarn = true
+		}
+	}
+	if !sawWarn {
+		t.Fatalf("expected empty-fallback warn: %+v", res.Issues)
+	}
+}
+
 func TestValidate_StdinPartsEmptyArrayRejected(t *testing.T) {
 	t.Parallel()
 	src := `

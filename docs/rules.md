@@ -102,6 +102,28 @@ newlines in `text:` if you need spacing.
 | `max_bytes` | 65536 | Cap on the rendered byte length of the part. |
 | `format` | `text` | `text` (human-readable speaker tags) or `jsonl` (one JSON object per line). |
 | `on_fetch_error` | `fail` | `fail` aborts the spawn with `❌ Thread fetch failed`. `fallback_event` synthesizes a single-message thread from the triggering event. |
+| `exclude_triggering_message` | `false` | Drop the message whose Slack ts equals the triggering event's ts. Pairs naturally with a leading `template: "{{text}}\n\n"` part so the latest mention shows once at the top instead of being duplicated at the bottom of the thread block. If the filter empties the part, the part contributes the empty string (no wrapper tags). |
+
+### Recommended composition for `app_mention` rules
+
+```yaml
+stdin:
+  parts:
+    - template: "{{text}}\n\n"        # latest mention, displayed once
+    - slack_thread:
+        exclude_triggering_message: true   # prior context only
+```
+
+- Standalone mention (no thread): the `slack_thread` part is empty, the
+  stdin is just the template text.
+- In-thread mention: the template shows the latest message at the top, and
+  the `slack_thread` block shows the parent and prior replies (the trigger
+  itself is excluded).
+
+Combining `exclude_triggering_message: true` with
+`on_fetch_error: fallback_event` is allowed but useless — the synthesized
+fallback contains only the triggering message, so the filter empties it.
+`slackrun check` emits a warning for this combination.
 
 ### Rate limit
 

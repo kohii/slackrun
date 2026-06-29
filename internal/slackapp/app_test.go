@@ -75,7 +75,7 @@ func TestBuildStdinPayload_ConcatsPartsInOrder(t *testing.T) {
 		{Kind: config.PartKindText, Text: "\nOUTRO"},
 	}}
 	thread := []slackthread.Message{{TS: "1", Source: slackthread.SourceUser, User: "U1", Text: "hi"}}
-	out := buildStdinPayload(spec, dispatch.TemplateVars{}, thread)
+	out := buildStdinPayload(spec, dispatch.TemplateVars{}, thread, "")
 	if !strings.HasPrefix(out, "INTRO\n") {
 		t.Errorf("missing INTRO prefix: %q", out)
 	}
@@ -92,9 +92,86 @@ func TestBuildStdinPayload_ExpandsTemplateVars(t *testing.T) {
 	spec := &config.StdinSpec{Parts: []config.StdinPart{
 		{Kind: config.PartKindTemplate, Template: "user={{user}} text={{text}}"},
 	}}
-	out := buildStdinPayload(spec, dispatch.TemplateVars{User: "U1", Text: "hello"}, nil)
+	out := buildStdinPayload(spec, dispatch.TemplateVars{User: "U1", Text: "hello"}, nil, "")
 	if out != "user=U1 text=hello" {
 		t.Fatalf("got %q", out)
+	}
+}
+
+func TestBuildStdinPayload_ExcludeTriggeringMessage_StandaloneMention_OmitsWrapper(t *testing.T) {
+	t.Parallel()
+	// Slack `conversations.replies` on a thread that does not exist yet
+	// returns just the triggering message. With ExcludeTriggeringMessage,
+	// the slack_thread part has nothing left to render — the part should
+	// contribute the empty string (no wrapper) so the stdin stays clean.
+	spec := &config.StdinSpec{Parts: []config.StdinPart{
+		{Kind: config.PartKindTemplate, Template: "{{text}}\n\n"},
+		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{ExcludeTriggeringMessage: true}},
+	}}
+	thread := []slackthread.Message{{TS: "1.0", Source: slackthread.SourceUser, User: "U1", Text: "hi"}}
+	out := buildStdinPayload(spec, dispatch.TemplateVars{Text: "hi"}, thread, "1.0")
+	if out != "hi\n\n" {
+		t.Fatalf("expected only the template part, got %q", out)
+	}
+	if strings.Contains(out, "UNTRUSTED_SLACK_THREAD") {
+		t.Fatalf("wrapper leaked into empty-thread output: %q", out)
+	}
+}
+
+func TestBuildStdinPayload_ExcludeTriggeringMessage_InThread_DropsTriggerOnly(t *testing.T) {
+	t.Parallel()
+	spec := &config.StdinSpec{Parts: []config.StdinPart{
+		{Kind: config.PartKindTemplate, Template: "{{text}}\n\n"},
+		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{ExcludeTriggeringMessage: true}},
+	}}
+	thread := []slackthread.Message{
+		{TS: "1000", Source: slackthread.SourceUser, User: "U1", Text: "parent"},
+		{TS: "1001", Source: slackthread.SourceUser, User: "U2", Text: "reply"},
+		{TS: "1003", Source: slackthread.SourceUser, User: "U1", Text: "trigger"}, // ← excluded
+	}
+	out := buildStdinPayload(spec, dispatch.TemplateVars{Text: "trigger"}, thread, "1003")
+	if !strings.HasPrefix(out, "trigger\n\n<UNTRUSTED_SLACK_THREAD>") {
+		t.Errorf("template prefix or wrapper missing: %q", out)
+	}
+	if !strings.Contains(out, "ts=1000>: parent") {
+		t.Errorf("parent dropped: %q", out)
+	}
+	if !strings.Contains(out, "ts=1001>: reply") {
+		t.Errorf("reply dropped: %q", out)
+	}
+	// The triggering message must not appear inside the thread block — the
+	// template part already shows it, and the whole point of the flag is to
+	// avoid the duplication.
+	if strings.Contains(out, "ts=1003>") {
+		t.Errorf("trigger leaked into thread block: %q", out)
+	}
+}
+
+func TestBuildStdinPayload_ExcludeTriggeringMessage_TriggerTSAbsent_PreservesAll(t *testing.T) {
+	t.Parallel()
+	// Dry-run path passes triggerTS="" to disable filtering. Verify nothing
+	// is removed in that case.
+	spec := &config.StdinSpec{Parts: []config.StdinPart{
+		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{ExcludeTriggeringMessage: true}},
+	}}
+	thread := []slackthread.Message{{TS: "1.0", Source: slackthread.SourceUser, User: "U1", Text: "kept"}}
+	out := buildStdinPayload(spec, dispatch.TemplateVars{}, thread, "")
+	if !strings.Contains(out, "kept") {
+		t.Fatalf("filtering applied with empty triggerTS: %q", out)
+	}
+}
+
+func TestBuildStdinPayload_ExcludeTriggeringMessage_NoMatch_PreservesAll(t *testing.T) {
+	t.Parallel()
+	// `message_changed`-like flows where the triggering TS is not present in
+	// the fetched messages. Filtering is a no-op, no error/warn here.
+	spec := &config.StdinSpec{Parts: []config.StdinPart{
+		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{ExcludeTriggeringMessage: true}},
+	}}
+	thread := []slackthread.Message{{TS: "1.0", Source: slackthread.SourceUser, User: "U1", Text: "kept"}}
+	out := buildStdinPayload(spec, dispatch.TemplateVars{}, thread, "9999.9")
+	if !strings.Contains(out, "kept") {
+		t.Fatalf("expected message preserved when trigger TS does not match: %q", out)
 	}
 }
 

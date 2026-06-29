@@ -322,7 +322,7 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 	}
 
 	timeout := time.Duration(rule.Action.TimeoutMs) * time.Millisecond
-	stdinPayload := buildStdinPayload(rule.Action.Stdin, vars, fetchedThread)
+	stdinPayload := buildStdinPayload(rule.Action.Stdin, vars, fetchedThread, ev.TS)
 	logging.Info("job start",
 		logging.F("rule", rule.Name),
 		logging.F("cwd", rule.Action.Cwd),
@@ -536,7 +536,15 @@ func strictestFetchErrorPolicy(s *config.StdinSpec) string {
 // stream suitable for piping to the child. Template parts are expanded with
 // the per-event vars; slack_thread parts are rendered against the fetched
 // thread (or a synthesized one when fetch fell back).
-func buildStdinPayload(s *config.StdinSpec, vars dispatch.TemplateVars, thread []slackthread.Message) string {
+//
+// triggerTS is the Slack ts of the event that started this run. It is used
+// to filter slack_thread parts that set ExcludeTriggeringMessage: those
+// parts emit the empty string instead of an empty <UNTRUSTED_SLACK_THREAD>
+// wrapper when the filtered list becomes empty (a typical case for a
+// standalone mention where the trigger is the only message in the thread).
+// Pass "" to apply no filtering (useful for dry-run preview without an
+// event payload).
+func buildStdinPayload(s *config.StdinSpec, vars dispatch.TemplateVars, thread []slackthread.Message, triggerTS string) string {
 	if s == nil {
 		return ""
 	}
@@ -548,16 +556,47 @@ func buildStdinPayload(s *config.StdinSpec, vars dispatch.TemplateVars, thread [
 		case config.PartKindTemplate:
 			sb.WriteString(dispatch.ExpandTemplate(p.Template, vars))
 		case config.PartKindSlackThread:
+			msgs := thread
+			if p.SlackThread != nil && p.SlackThread.ExcludeTriggeringMessage && triggerTS != "" {
+				msgs = excludeByTS(msgs, triggerTS)
+				if len(msgs) == 0 {
+					continue // empty after filter → contribute nothing
+				}
+			}
 			opts := slackthread.FormatOptions{}
 			if p.SlackThread != nil {
 				opts.Format = slackthread.Format(p.SlackThread.Format)
 				opts.MaxMessages = p.SlackThread.MaxMessages
 				opts.MaxBytes = p.SlackThread.MaxBytes
 			}
-			sb.WriteString(slackthread.Render(thread, opts))
+			sb.WriteString(slackthread.Render(msgs, opts))
 		}
 	}
 	return sb.String()
+}
+
+// excludeByTS returns msgs with any element whose TS equals ts removed.
+// Returns msgs unchanged when ts is empty or no match exists. We allocate
+// only when filtering actually removes something, since the common in-thread
+// case removes exactly one message.
+func excludeByTS(msgs []slackthread.Message, ts string) []slackthread.Message {
+	if ts == "" {
+		return msgs
+	}
+	hit := -1
+	for i, m := range msgs {
+		if m.TS == ts {
+			hit = i
+			break
+		}
+	}
+	if hit < 0 {
+		return msgs
+	}
+	out := make([]slackthread.Message, 0, len(msgs)-1)
+	out = append(out, msgs[:hit]...)
+	out = append(out, msgs[hit+1:]...)
+	return out
 }
 
 // failedFetchProgressMessage is the body posted to Slack when thread fetch

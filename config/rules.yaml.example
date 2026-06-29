@@ -65,7 +65,8 @@ rules:
       stdin:
         parts:
           - template: "{{rest}}\n\n"
-          - slack_thread: {}
+          - slack_thread:
+              exclude_triggering_message: true
 
   # 3. Default mention (no keyword) → drop into your home dir.
   - name: mention-default
@@ -78,4 +79,5 @@ rules:
       stdin:
         parts:
           - template: "{{text}}\n\n"
-          - slack_thread: {}
+          - slack_thread:
+              exclude_triggering_message: true

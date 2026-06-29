@@ -146,6 +146,16 @@ type SlackThreadSpec struct {
 	MaxBytes     int    `yaml:"max_bytes,omitempty"`
 	Format       string `yaml:"format,omitempty"`         // "text" (default) | "jsonl"
 	OnFetchError string `yaml:"on_fetch_error,omitempty"` // "fail" (default) | "fallback_event"
+	// ExcludeTriggeringMessage drops the message whose ts equals the
+	// triggering event's ts from the rendered thread. Pairs naturally with
+	// a leading `template: "{{text}}\n\n"` part so the latest mention shows
+	// once at the top and the rest of the thread (if any) shows below.
+	//
+	// Slack-side TS equality is the entire matching rule; edited or
+	// `message_changed`-derived events are not in scope. When the filtered
+	// result is empty, the slack_thread part contributes the empty string
+	// (no wrapper tags).
+	ExcludeTriggeringMessage bool `yaml:"exclude_triggering_message,omitempty"`
 }
 
 // rawStdinPart is the strict-decode shadow used to detect "more than one
@@ -544,6 +554,13 @@ func validateStdin(s *StdinSpec, add func(ValidationIssueLevel, string)) {
 			case "", "fail", "fallback_event":
 			default:
 				add(IssueError, fmt.Sprintf("%s.slack_thread.on_fetch_error must be \"fail\" or \"fallback_event\" (got %q)", prefix, st.OnFetchError))
+			}
+			if st.ExcludeTriggeringMessage && st.OnFetchError == "fallback_event" {
+				// The synthesized fallback thread is the triggering message
+				// itself; excluding it leaves the part empty, defeating the
+				// fallback. Warn rather than error so the combination is
+				// still possible if it ever becomes meaningful.
+				add(IssueWarn, prefix+".slack_thread: exclude_triggering_message=true with on_fetch_error=fallback_event yields an empty fallback (the synthesized message is the trigger itself)")
 			}
 		default:
 			add(IssueError, prefix+" has no recognized part variant")
