@@ -16,8 +16,11 @@ rules:
       type: app_mention
     action:
       cwd: %s
-      command: ["echo", "{{text}}"]
+      command: ["echo"]
       timeout_ms: 60000
+      stdin:
+        parts:
+          - template: "{{text}}"
 
   - name: sentry-alert
     trigger:
@@ -27,8 +30,11 @@ rules:
         bot_user_ids: [U01SENTRY1]
     action:
       cwd: %s
-      command: ["echo", "/alert {{permalink}}"]
+      command: ["echo"]
       timeout_ms: 600000
+      stdin:
+        parts:
+          - template: "/alert {{permalink}}"
 `
 
 func writeRules(t *testing.T) string {
@@ -96,8 +102,11 @@ func TestRunDryRun_Match(t *testing.T) {
 		t.Fatalf("rule=%v", got["rule"])
 	}
 	cmd := got["command"].([]any)
-	if len(cmd) != 2 || cmd[0] != "echo" || cmd[1] != "hello world" {
+	if len(cmd) != 1 || cmd[0] != "echo" {
 		t.Fatalf("command=%v", cmd)
+	}
+	if s, _ := got["stdin"].(string); s != "hello world" {
+		t.Fatalf("stdin=%q", s)
 	}
 }
 

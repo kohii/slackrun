@@ -10,6 +10,7 @@ import (
 
 	"github.com/kohii/slackrun/internal/config"
 	"github.com/kohii/slackrun/internal/dispatch"
+	"github.com/kohii/slackrun/internal/slackthread"
 )
 
 // dryRunInput is the shape we expect from --event. We try to mirror Slack's
@@ -132,17 +133,19 @@ func RunDryRun(args []string, stdout, stderr io.Writer) int {
 			Channel:   dispEv.Channel,
 			User:      dispEv.User,
 		}
-		expanded := make([]string, len(res.Rule.Action.Command))
-		for i, a := range res.Rule.Action.Command {
-			expanded[i] = dispatch.ExpandTemplate(a, vars)
-		}
 		report["rule"] = res.Rule.Name
 		report["cwd"] = res.Rule.Action.Cwd
 		report["timeout_ms"] = res.Rule.Action.TimeoutMs
-		report["command"] = expanded
+		report["command"] = res.Rule.Action.Command
 		report["text"] = res.Text
 		report["first_token"] = res.FirstToken
 		report["rest"] = res.Rest
+		// Render stdin parts with an empty thread so operators can see the
+		// shape (and template expansion) without actually calling Slack.
+		if spec := res.Rule.Action.Stdin; spec != nil {
+			report["stdin"] = renderStdinPreview(spec, vars)
+			report["thread_fetch"] = stdinUsesThread(spec)
+		}
 	} else if res.Kind == dispatch.MatchKindNoMatch {
 		report["text"] = res.Text
 		report["first_token"] = res.FirstToken
@@ -165,6 +168,45 @@ func matchKindName(k dispatch.MatchKind) string {
 		return "no-match"
 	}
 	return "unknown"
+}
+
+// renderStdinPreview composes the parts as runMatched would, but without
+// fetching a real thread. The slack_thread part renders as its empty form
+// (just the wrapping tags) so the operator sees that the part exists.
+func renderStdinPreview(s *config.StdinSpec, vars dispatch.TemplateVars) string {
+	if s == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, p := range s.Parts {
+		switch p.Kind {
+		case config.PartKindText:
+			sb.WriteString(p.Text)
+		case config.PartKindTemplate:
+			sb.WriteString(dispatch.ExpandTemplate(p.Template, vars))
+		case config.PartKindSlackThread:
+			opts := slackthread.FormatOptions{}
+			if p.SlackThread != nil {
+				opts.Format = slackthread.Format(p.SlackThread.Format)
+				opts.MaxMessages = p.SlackThread.MaxMessages
+				opts.MaxBytes = p.SlackThread.MaxBytes
+			}
+			sb.WriteString(slackthread.Render(nil, opts))
+		}
+	}
+	return sb.String()
+}
+
+func stdinUsesThread(s *config.StdinSpec) bool {
+	if s == nil {
+		return false
+	}
+	for _, p := range s.Parts {
+		if p.Kind == config.PartKindSlackThread {
+			return true
+		}
+	}
+	return false
 }
 
 func splitCSV(s string) []string {

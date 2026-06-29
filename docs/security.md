@@ -8,7 +8,7 @@ below are the design.
 | Boundary | Enforced by |
 |---|---|
 | `cwd` is never derived from Slack input | rules.yaml is the only source; absolute paths required, existence checked at boot. |
-| `command` argv is never derived from Slack input (only template variables) | The argv lives entirely in rules.yaml. Template vars (`{{text}}` etc.) expand inside each arg but the array structure is fixed. |
+| `command` argv is never derived from Slack input | The argv lives entirely in rules.yaml. `{{var}}` tokens are rejected in argv elements; variable content can only enter the child via `action.stdin.parts`. |
 | Only known senders trigger `type: message` rules | The schema makes `trigger.from` mandatory for `type: message`, with at least one of `bot_user_ids` / `app_ids` / `usernames`. |
 | Only allowed users can `@bot` | `ALLOWED_USER_IDS` env var; everything else is logged `unauthorized` and dropped. |
 | Self-loop prevention | `auth.test` resolves the bot's own user_id / bot_id; events matching either are skipped. |
@@ -16,19 +16,47 @@ below are the design.
 
 ## Template expansion is text, not code
 
-Each `command` array element is treated as a single argv string after
-template expansion. There is no shell interpretation — `;`, `$(...)`,
-backticks, redirection operators in expanded text are passed literally to the
-program as part of its argument. A malicious mention saying
+`{{...}}` is allowed only inside `action.stdin.parts[].template`. slackrun
+writes the expanded string to the child's stdin pipe — never to argv, never
+through a shell. There is no shell interpretation, no `ps aux` exposure for
+the expanded body, no shell-quoting hazard.
+
+A malicious mention saying
 
 ```
 @bot run ; rm -rf ~
 ```
 
-becomes argv `["claude", "-p", "run ; rm -rf ~"]`, not two shell commands.
-If a rule explicitly opts into a shell with `["sh", "-c", "..."]`, then
-shell-injection rules apply — keep template variables out of the script in
-that case, or pass them as positional args (`["sh", "-c", "echo \"$1\"", "_", "{{text}}"]`).
+becomes a stdin payload like `run ; rm -rf ~` and the child reads it as
+data, not commands. If a rule explicitly opts into a shell via
+`["bash", "-c", "..."]`, the shell script itself lives in rules.yaml (still
+no Slack input) — the only way Slack content reaches that script is via
+stdin or `SLACKRUN_*` env vars, both of which are safe under
+`"$VAR"`-quoted shell reads.
+
+## Slack thread context is untrusted
+
+When a rule's `action.stdin.parts` includes `slack_thread:`, slackrun fetches
+`conversations.replies` for the triggering thread and renders it wrapped in:
+
+```
+<UNTRUSTED_SLACK_THREAD>
+...
+</UNTRUSTED_SLACK_THREAD>
+```
+
+Authorization (`ALLOWED_USER_IDS`) gates only the **trigger** event, not the
+thread's history. Other users' (and bots') prior messages in the same thread
+are still piped to the child. Treat them as untrusted data and instruct the
+downstream AI to consider its system prompt the authority, not anything
+inside the tags.
+
+slackrun's own prior replies are labelled `[self bot ts=...]` so the AI can
+distinguish them from genuine user input. Self-detection compares Slack's
+`user` field against `auth.test`'s `user_id`, and `bot_id` against
+`auth.test`'s `bot_id`. If the bot token does not expose a `bot_id` (some
+user-token configurations), prior progress messages may be rendered as
+generic bot output instead. Boot logs warn when `bot_id` is missing.
 
 ## PII redaction
 
@@ -125,10 +153,23 @@ Tune `MIN_EVENT_AGE_MS_AT_BOOT` if you care.
 
 ## Command-line argument exposure
 
-The configured `command` is spawned as a child process. Its argv — including
-any template-expanded text — is visible to other local users via `ps aux`.
-**Don't run slackrun on a shared machine.** If you need to, choose programs
-that read prompts over stdin and configure them accordingly.
+The configured `command` is spawned as a child process. Its argv is visible
+to other local users via `ps aux`. slackrun keeps Slack content **out of
+argv** by forbidding `{{var}}` in `action.command` and routing variable
+content through `action.stdin` instead.
+
+Downstream programs that re-expose stdin content via their own argv (e.g. a
+shell wrapper `["bash", "-c", "claude -p \"$SLACKRUN_THREAD\""]`) defeat
+this protection — `claude`'s argv will hold the thread. Prefer stdin-aware
+forms when you can:
+
+```yaml
+command: [claude, -p]                       # claude reads prompt from stdin
+# OR
+command: [bash, -c, 'claude -p "$(cat)"']   # cat reads stdin in the shell
+```
+
+**Don't run slackrun on a shared machine.**
 
 ## What slackrun does not protect against
 

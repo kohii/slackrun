@@ -29,16 +29,22 @@ rules:
         usernames: ["Sentry"]
     action:
       cwd: /tmp
-      command: ["echo", "{{permalink}}"]
+      command: ["echo", "alert"]
       timeout_ms: 60000
+      stdin:
+        parts:
+          - template: "permalink: {{permalink}}"
 
   - name: mention-default
     trigger:
       type: app_mention
     action:
       cwd: /tmp
-      command: ["echo", "{{text}}"]
+      command: ["claude", "-p"]
       timeout_ms: 60000
+      stdin:
+        parts:
+          - template: "{{text}}"
 `
 
 func TestParseRulesYAML_Valid(t *testing.T) {
@@ -284,5 +290,176 @@ rules:
 	}
 	if !res.Rules[0].Action.ExposeSlackToken {
 		t.Fatal("expose_slack_token should be true")
+	}
+}
+
+func TestValidate_RejectsTemplateInCommandArgv(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: ["claude", "-p", "{{text}}"]
+      timeout_ms: 1000
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "argv expansion is forbidden") {
+		t.Fatalf("expected argv template rejection: %+v", res.Issues)
+	}
+}
+
+func TestValidate_StdinPartsAllVariants(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [claude, -p]
+      timeout_ms: 1000
+      stdin:
+        parts:
+          - text: "you are an assistant"
+          - slack_thread:
+              max_messages: 50
+              max_bytes: 65536
+              format: text
+              on_fetch_error: fail
+          - template: "user: {{user}}"
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %+v", res.Issues)
+	}
+	parts := res.Rules[0].Action.Stdin.Parts
+	if len(parts) != 3 {
+		t.Fatalf("got %d parts, want 3", len(parts))
+	}
+	if parts[0].Kind != PartKindText {
+		t.Errorf("parts[0] kind = %v", parts[0].Kind)
+	}
+	if parts[1].Kind != PartKindSlackThread {
+		t.Errorf("parts[1] kind = %v", parts[1].Kind)
+	}
+	if parts[2].Kind != PartKindTemplate {
+		t.Errorf("parts[2] kind = %v", parts[2].Kind)
+	}
+}
+
+func TestValidate_StdinPartRejectsMultipleVariants(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        parts:
+          - text: "x"
+            template: "y"
+`
+	if _, err := ParseRulesYAML([]byte(src), "<test>"); err == nil {
+		t.Fatal("expected error on multi-variant part")
+	}
+}
+
+func TestValidate_StdinPartRejectsEmpty(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        parts:
+          - {}
+`
+	if _, err := ParseRulesYAML([]byte(src), "<test>"); err == nil {
+		t.Fatal("expected error on empty part")
+	}
+}
+
+func TestValidate_TemplatePartRejectsUnknownVar(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        parts:
+          - template: "hello {{bogus}}"
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "unknown variable {{bogus}}") {
+		t.Fatalf("expected unknown-var error: %+v", res.Issues)
+	}
+}
+
+func TestValidate_SlackThreadEnums(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		body   string
+		needle string
+	}{
+		{"format", `format: yaml`, `format must be "text" or "jsonl"`},
+		{"on_fetch_error", `on_fetch_error: retry`, `on_fetch_error must be "fail" or "fallback_event"`},
+		{"max_messages", `max_messages: -1`, "max_messages must be >= 0"},
+		{"max_bytes", `max_bytes: -1`, "max_bytes must be >= 0"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        parts:
+          - slack_thread:
+              ` + c.body + `
+`
+			res := parseAndValidate(t, src)
+			if !hasIssue(res.Issues, c.needle) {
+				t.Fatalf("missing %q: %+v", c.needle, res.Issues)
+			}
+		})
+	}
+}
+
+func TestValidate_StdinPartsEmptyArrayRejected(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        parts: []
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "must contain at least one part") {
+		t.Fatalf("expected empty-parts error: %+v", res.Issues)
 	}
 }

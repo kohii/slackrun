@@ -6,15 +6,30 @@
 # `message` events match only `type: message` rules.
 # `type: message` requires `trigger.from` so unknown senders cannot trigger spawns.
 #
-# Template variables available in `action.command`:
-#   {{permalink}}  Slack permalink for the triggering message
+# Template variables (allowed inside `action.stdin.parts[].template` only):
+#   {{permalink}}  Slack permalink for the triggering message (lazy fetch)
 #   {{text}}       message text (mentions stripped for app_mention)
 #   {{rest}}       text minus the matched keyword (mentions only)
 #   {{channel}}    Slack channel ID
 #   {{user}}       Slack user ID of the event author
+#
+# `action.stdin.parts[]` builds the byte stream slackrun pipes to the child's
+# stdin. Parts are concatenated in document order without separators. Each
+# part is exactly one of:
+#   - text:          literal string
+#   - template:      string with {{var}} expansion
+#   - slack_thread:  declarative pointer; slackrun calls conversations.replies
+#                    and renders the result wrapped in
+#                    <UNTRUSTED_SLACK_THREAD> tags
+#
+# `action.command` is the argv passed directly to execve. `{{var}}` tokens in
+# argv elements are rejected — variable content lives in stdin where it does
+# not leak via `ps aux`.
 
 rules:
-  # 1. Sentry alerts in #alert → run a Claude skill against your workspace.
+  # 1. Sentry alerts in #alert → run a Claude skill against your workspace,
+  #    feeding the full thread context (alert + prior triage discussion) via
+  #    stdin so the AI has the same view a human would.
   - name: sentry-alert
     description: "Sentry notifications posted to #alert"
     trigger:
@@ -26,10 +41,18 @@ rules:
         usernames: ["Sentry"]
     action:
       cwd: /path/to/your/workspace        # replace with an absolute path
-      command: ["claude", "-p", "/alert-handling {{permalink}}"]
+      command: [claude, -p]               # reads prompt from stdin
       timeout_ms: 1200000
+      expose_slack_token: true             # write back via slackrun post/react
+      stdin:
+        parts:
+          - text: |
+              You are a Sentry alert triage assistant. Use the alert-handling skill.
+          - slack_thread: {}                # default cap: 50 msgs / 64 KiB
+          - template: "Permalink: {{permalink}}\n"
 
-  # 2. @your-bot henry … → run Claude in the henry workspace.
+  # 2. @your-bot henry … → run Claude in the henry workspace with the
+  #    mention text (after the keyword) plus the thread for context.
   - name: mention-henry
     description: "@your-bot henry <prompt> → henry workspace"
     trigger:
@@ -37,8 +60,12 @@ rules:
       keyword: henry
     action:
       cwd: /path/to/your/workspace
-      command: ["claude", "-p", "{{rest}}"]
+      command: [claude, -p]
       timeout_ms: 900000
+      stdin:
+        parts:
+          - template: "{{rest}}\n\n"
+          - slack_thread: {}
 
   # 3. Default mention (no keyword) → drop into your home dir.
   - name: mention-default
@@ -46,5 +73,9 @@ rules:
       type: app_mention
     action:
       cwd: /Users/your-username           # replace with an absolute path
-      command: ["claude", "-p", "{{text}}"]
+      command: [claude, -p]
       timeout_ms: 900000
+      stdin:
+        parts:
+          - template: "{{text}}\n\n"
+          - slack_thread: {}

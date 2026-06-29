@@ -3,6 +3,7 @@ package slackapp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,11 +11,17 @@ import (
 	"github.com/kohii/slackrun/internal/dispatch"
 	"github.com/kohii/slackrun/internal/logging"
 	"github.com/kohii/slackrun/internal/runner"
+	"github.com/kohii/slackrun/internal/slackthread"
 	"github.com/kohii/slackrun/internal/util"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 )
+
+// threadFetchTimeout bounds how long we'll wait on conversations.replies
+// before falling back. The hot path doesn't tolerate slow Slack: we'd block
+// progress reporting and confuse the user.
+const threadFetchTimeout = 5 * time.Second
 
 // App is the long-lived slackrun process. Construct with New, then call Run.
 type App struct {
@@ -238,6 +245,59 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		}
 	}
 
+	// Resolve thread fetch and permalink BEFORE posting our "⏳ Working"
+	// progress message. Otherwise that progress message itself would show up
+	// in the conversations.replies result and pollute the AI's context.
+	var fetchedThread []slackthread.Message
+	var fetchErr error
+	if needsThreadFetch(rule.Action.Stdin) {
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, threadFetchTimeout)
+		fr, err := slackthread.Fetch(fetchCtx, a.api, slackthread.FetchOptions{
+			Channel:    ev.Channel,
+			ThreadTS:   threadTS,
+			SelfUserID: a.selfUserID,
+			SelfBotID:  a.selfBotID,
+		})
+		fetchCancel()
+		if err != nil {
+			fetchErr = err
+			logging.Warn("conversations.replies failed",
+				logging.F("error", err),
+				logging.F("rule", rule.Name),
+				logging.F("channel", ev.Channel),
+				logging.F("threadTs", threadTS),
+			)
+		} else {
+			fetchedThread = fr.Messages
+			if fr.HasMore {
+				logging.Warn("thread fetch hit pagination cap",
+					logging.F("rule", rule.Name),
+					logging.F("kept", len(fr.Messages)),
+				)
+			}
+		}
+	}
+
+	if fetchErr != nil && strictestFetchErrorPolicy(rule.Action.Stdin) == "fail" {
+		// Honour `on_fetch_error: fail`: post the failure directly so the
+		// user never sees a transient "⏳ Working…" that gets overwritten.
+		if _, _, perr := a.api.PostMessage(ev.Channel,
+			slack.MsgOptionText(failedFetchProgressMessage(), false),
+			slack.MsgOptionTS(threadTS),
+			slack.MsgOptionDisableMarkdown(),
+		); perr != nil {
+			logging.Error("post fetch-fail message failed",
+				logging.F("error", perr), logging.F("rule", rule.Name))
+		}
+		return
+	}
+
+	if fetchErr != nil {
+		// `on_fetch_error: fallback_event` — synthesize a single-message
+		// thread from the triggering event so the child still sees context.
+		fetchedThread = synthesizeFallbackThread(ev, a.selfUserID, a.selfBotID)
+	}
+
 	progress, err := StartProgress(ctx, a.api, ev.Channel, threadTS)
 	if err != nil {
 		logging.Error("failed to start progress message", logging.F("error", err), logging.F("rule", rule.Name))
@@ -247,17 +307,9 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 	jobID := fmt.Sprintf("%s:%s:%s", ev.Channel, ev.TS, rule.Name)
 	a.jobs.register(jobID, progress, nil) // exec handle is filled in below
 
-	// Permalink is only resolved when a rule references it — avoids an extra
-	// API call per event for mention flows that do not use it.
+	// Permalink is only resolved when the rule's template parts reference it.
 	var permalink string
-	needsPermalink := false
-	for _, arg := range rule.Action.Command {
-		if dispatch.TemplateUsesPermalink(arg) {
-			needsPermalink = true
-			break
-		}
-	}
-	if needsPermalink {
+	if needsPermalink(rule.Action.Stdin) {
 		permalink = a.resolvePermalink(ctx, ev.Channel, ev.TS)
 	}
 
@@ -268,17 +320,16 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		Channel:   ev.Channel,
 		User:      ev.User,
 	}
-	argv := make([]string, len(rule.Action.Command))
-	for i, arg := range rule.Action.Command {
-		argv[i] = dispatch.ExpandTemplate(arg, vars)
-	}
 
 	timeout := time.Duration(rule.Action.TimeoutMs) * time.Millisecond
+	stdinPayload := buildStdinPayload(rule.Action.Stdin, vars, fetchedThread)
 	logging.Info("job start",
 		logging.F("rule", rule.Name),
 		logging.F("cwd", rule.Action.Cwd),
 		logging.F("timeoutMs", rule.Action.TimeoutMs),
 		logging.F("hasPermalink", permalink != ""),
+		logging.F("threadMessages", len(fetchedThread)),
+		logging.F("stdinBytes", len(stdinPayload)),
 	)
 
 	// Inject SLACKRUN_* on top of action.env so the child has the message
@@ -292,13 +343,17 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 	childEnv["SLACKRUN_THREAD_TS"] = threadTS
 	childEnv["SLACKRUN_USER"] = ev.User
 
-	handle := runner.Run(runner.Options{
-		Command:          argv,
+	runOpts := runner.Options{
+		Command:          rule.Action.Command,
 		Cwd:              rule.Action.Cwd,
 		Env:              childEnv,
 		ExposeSlackToken: rule.Action.ExposeSlackToken,
 		Timeout:          timeout,
-	})
+	}
+	if stdinPayload != "" {
+		runOpts.Stdin = strings.NewReader(stdinPayload)
+	}
+	handle := runner.Run(runOpts)
 	a.jobs.updateExec(jobID, &handle)
 	defer a.jobs.unregister(jobID)
 
@@ -416,7 +471,147 @@ func fromMessage(e *slackevents.MessageEvent) dispatch.IncomingEvent {
 		}
 		if e.Message.BotProfile != nil {
 			ev.Nested.BotProfileName = e.Message.BotProfile.Name
+			// AppID lives only inside BotProfile in slack-go's Msg shape.
+			// Without this the matcher's `trigger.from.app_ids` never fires
+			// for bot-authored messages (notably Sentry alerts).
+			ev.Nested.AppID = e.Message.BotProfile.AppID
 		}
 	}
 	return ev
+}
+
+// needsThreadFetch reports whether any part of the rule's stdin spec needs
+// the fetched thread. Plain `text` / `template` parts never trigger a fetch.
+func needsThreadFetch(s *config.StdinSpec) bool {
+	if s == nil {
+		return false
+	}
+	for _, p := range s.Parts {
+		if p.Kind == config.PartKindSlackThread {
+			return true
+		}
+	}
+	return false
+}
+
+// needsPermalink reports whether any template part references `{{permalink}}`.
+func needsPermalink(s *config.StdinSpec) bool {
+	if s == nil {
+		return false
+	}
+	for _, p := range s.Parts {
+		if p.Kind == config.PartKindTemplate && dispatch.TemplateUsesPermalink(p.Template) {
+			return true
+		}
+	}
+	return false
+}
+
+// strictestFetchErrorPolicy returns the strictest on_fetch_error policy
+// across all slack_thread parts. `fail` wins over `fallback_event` so a
+// single strict part is enough to block the spawn. Empty/default is `fail`.
+func strictestFetchErrorPolicy(s *config.StdinSpec) string {
+	if s == nil {
+		return "fail"
+	}
+	hasFallback := false
+	for _, p := range s.Parts {
+		if p.Kind != config.PartKindSlackThread || p.SlackThread == nil {
+			continue
+		}
+		switch p.SlackThread.OnFetchError {
+		case "fallback_event":
+			hasFallback = true
+		case "fail", "":
+			return "fail"
+		}
+	}
+	if hasFallback {
+		return "fallback_event"
+	}
+	return "fail"
+}
+
+// buildStdinPayload concatenates the rule's stdin parts into a single byte
+// stream suitable for piping to the child. Template parts are expanded with
+// the per-event vars; slack_thread parts are rendered against the fetched
+// thread (or a synthesized one when fetch fell back).
+func buildStdinPayload(s *config.StdinSpec, vars dispatch.TemplateVars, thread []slackthread.Message) string {
+	if s == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, p := range s.Parts {
+		switch p.Kind {
+		case config.PartKindText:
+			sb.WriteString(p.Text)
+		case config.PartKindTemplate:
+			sb.WriteString(dispatch.ExpandTemplate(p.Template, vars))
+		case config.PartKindSlackThread:
+			opts := slackthread.FormatOptions{}
+			if p.SlackThread != nil {
+				opts.Format = slackthread.Format(p.SlackThread.Format)
+				opts.MaxMessages = p.SlackThread.MaxMessages
+				opts.MaxBytes = p.SlackThread.MaxBytes
+			}
+			sb.WriteString(slackthread.Render(thread, opts))
+		}
+	}
+	return sb.String()
+}
+
+// failedFetchProgressMessage is the body posted to Slack when thread fetch
+// fails under `on_fetch_error: fail`. Fixed wording — the original error
+// goes to logs, not the channel, to avoid leaking Slack API details (and
+// any PII the API might echo back) into the user-facing thread.
+func failedFetchProgressMessage() string {
+	return "❌ Thread fetch failed (see logs)"
+}
+
+// synthesizeFallbackThread builds a single-message thread from the
+// triggering event itself. Used when conversations.replies fails and the
+// rule asked for `on_fetch_error: fallback_event`. The message carries the
+// untrusted Slack content the formatter is already designed to mark.
+func synthesizeFallbackThread(ev dispatch.IncomingEvent, selfUserID, selfBotID string) []slackthread.Message {
+	text := dispatch.ExtractText(ev)
+	user := ev.User
+	botID := ev.BotID
+	if ev.Nested != nil {
+		if user == "" {
+			user = ev.Nested.User
+		}
+		if botID == "" {
+			botID = ev.Nested.BotID
+		}
+	}
+
+	m := slackthread.Message{TS: ev.TS, Text: text}
+	if (selfUserID != "" && user == selfUserID) || (selfBotID != "" && botID == selfBotID) {
+		m.Source = slackthread.SourceSelf
+		return []slackthread.Message{m}
+	}
+	if user != "" {
+		m.Source = slackthread.SourceUser
+		m.User = user
+		return []slackthread.Message{m}
+	}
+	m.Source = slackthread.SourceBot
+	name := firstNonEmpty(ev.Username, ev.BotProfileName)
+	if name == "" && ev.Nested != nil {
+		name = firstNonEmpty(ev.Nested.Username, ev.Nested.BotProfileName, ev.Nested.AppID)
+	}
+	if name == "" {
+		name = botID
+	}
+	m.Bot = name
+	return []slackthread.Message{m}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

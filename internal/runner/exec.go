@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -47,6 +48,11 @@ type Options struct {
 	// SigKillGrace overrides the default 5s grace between SIGTERM and SIGKILL.
 	// Used by tests to keep them fast.
 	SigKillGrace time.Duration
+	// Stdin, if non-nil, is connected to the child's stdin. Use a bytes.Reader
+	// for small payloads or an io.PipeReader the caller writes to in a
+	// goroutine. nil leaves stdin pointing at /dev/null (the OS default for
+	// an unset Cmd.Stdin).
+	Stdin io.Reader
 }
 
 // Handle exposes the running job. Done fires exactly once with the final
@@ -89,6 +95,9 @@ func Run(opts Options) Handle {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	if opts.Stdin != nil {
+		cmd.Stdin = opts.Stdin
+	}
 
 	if err := cmd.Start(); err != nil {
 		notFound := errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)

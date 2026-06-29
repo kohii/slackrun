@@ -90,8 +90,10 @@ func (t *Trigger) UnmarshalYAML(node *yaml.Node) error {
 }
 
 // Action is the side-effect of a matched rule. `Command` is an argv (no
-// shell), so `;` `$(...)` and backticks are inert; each element is run
-// through ExpandTemplate first.
+// shell): `;` `$(...)` and backticks are inert, and `{{...}}` tokens are
+// rejected at load time. Send the template-expanded prompt to the child via
+// `Stdin.Parts` instead — that path keeps untrusted thread content off the
+// process's argv where it would otherwise be visible to `ps aux`.
 type Action struct {
 	Cwd       string            `yaml:"cwd"`
 	Command   []string          `yaml:"command"`
@@ -103,6 +105,95 @@ type Action struct {
 	// `rules.yaml` is the single place to audit which children get token
 	// access.
 	ExposeSlackToken bool `yaml:"expose_slack_token,omitempty"`
+	// Stdin declaratively builds the byte stream slackrun pipes to the
+	// child's stdin. Optional; absent means the child reads nothing.
+	Stdin *StdinSpec `yaml:"stdin,omitempty"`
+}
+
+// StdinSpec is the declarative recipe for the child's stdin payload.
+// Currently a thin wrapper over Parts so future top-level options (e.g.
+// `redact: true`) can be added without breaking the part schema.
+type StdinSpec struct {
+	Parts []StdinPart `yaml:"parts"`
+}
+
+// StdinPartKind discriminates the variants of StdinPart.
+type StdinPartKind int
+
+const (
+	PartKindUnknown StdinPartKind = iota
+	PartKindText
+	PartKindTemplate
+	PartKindSlackThread
+)
+
+// StdinPart is exactly one of `text`, `template`, or `slack_thread`. The
+// strict unmarshaler enforces single-variant occupancy at load time.
+type StdinPart struct {
+	Kind        StdinPartKind
+	Text        string
+	Template    string
+	SlackThread *SlackThreadSpec
+}
+
+// SlackThreadSpec configures a `slack_thread` stdin part.
+//
+// MaxMessages / MaxBytes default to slackthread package defaults if zero;
+// callers should pass them through unchanged so the resolution lives in one
+// place.
+type SlackThreadSpec struct {
+	MaxMessages  int    `yaml:"max_messages,omitempty"`
+	MaxBytes     int    `yaml:"max_bytes,omitempty"`
+	Format       string `yaml:"format,omitempty"`         // "text" (default) | "jsonl"
+	OnFetchError string `yaml:"on_fetch_error,omitempty"` // "fail" (default) | "fallback_event"
+}
+
+// rawStdinPart is the strict-decode shadow used to detect "more than one
+// variant present" cases.
+type rawStdinPart struct {
+	Text        *string          `yaml:"text,omitempty"`
+	Template    *string          `yaml:"template,omitempty"`
+	SlackThread *SlackThreadSpec `yaml:"slack_thread,omitempty"`
+}
+
+// UnmarshalYAML decodes a part and ensures exactly one variant is set. The
+// surrounding loader then validates contents (template var names, format
+// enum, etc.).
+func (p *StdinPart) UnmarshalYAML(node *yaml.Node) error {
+	var raw rawStdinPart
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	set := 0
+	if raw.Text != nil {
+		set++
+	}
+	if raw.Template != nil {
+		set++
+	}
+	if raw.SlackThread != nil {
+		set++
+	}
+	switch set {
+	case 0:
+		return errors.New("stdin part must set exactly one of: text, template, slack_thread")
+	case 1:
+		// ok
+	default:
+		return errors.New("stdin part must set only one of: text, template, slack_thread")
+	}
+	switch {
+	case raw.Text != nil:
+		p.Kind = PartKindText
+		p.Text = *raw.Text
+	case raw.Template != nil:
+		p.Kind = PartKindTemplate
+		p.Template = *raw.Template
+	case raw.SlackThread != nil:
+		p.Kind = PartKindSlackThread
+		p.SlackThread = raw.SlackThread
+	}
+	return nil
 }
 
 // Rule is the on-disk unit slackrun matches events against. Order matters:
@@ -144,11 +235,27 @@ type CheckOptions struct {
 // nameRe constrains rule.name to identifier-ish characters so the value is
 // safe in logs and metric labels.
 var (
-	nameRe         = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	channelIDRe    = regexp.MustCompile(`^[CG][A-Z0-9]{2,}$`)
-	botUserIDRe    = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
-	appIDRe        = regexp.MustCompile(`^A[A-Z0-9]{2,}$`)
-	envVarNameRe   = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	nameRe       = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	channelIDRe  = regexp.MustCompile(`^[CG][A-Z0-9]{2,}$`)
+	botUserIDRe  = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
+	appIDRe      = regexp.MustCompile(`^A[A-Z0-9]{2,}$`)
+	envVarNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+	// anyTemplateRe matches any `{{name}}` token in a config string. Kept
+	// independent of the dispatch package's recognized-name regex so that
+	// rules loader stays free of cycles, and so a typo like `{{texts}}` is
+	// rejected here without needing to round-trip through expansion.
+	anyTemplateRe = regexp.MustCompile(`\{\{\s*([^{}\s]+)\s*\}\}`)
+
+	// knownTemplateVarsInRules lists the variables that may appear inside a
+	// `template` stdin part. Keep in sync with dispatch.ExpandTemplate.
+	knownTemplateVarsInRules = map[string]struct{}{
+		"permalink": {},
+		"text":      {},
+		"rest":      {},
+		"channel":   {},
+		"user":      {},
+	}
 )
 
 // ValidationResult is what loaders return.
@@ -335,8 +442,21 @@ func validateRule(r Rule) []ValidationIssue {
 	} else if strings.TrimSpace(r.Action.Command[0]) == "" {
 		add(IssueError, "action.command[0] (program) is empty")
 	}
+	// `{{var}}` in argv is rejected because the expanded value lands on the
+	// child process's argv where it is visible to `ps aux` (and bounded by
+	// ARG_MAX). Use `action.stdin.parts[].template` for variable substitution
+	// — that path pipes into the child's stdin, which is invisible to
+	// process listings.
+	for i, arg := range r.Action.Command {
+		if anyTemplateRe.MatchString(arg) {
+			add(IssueError, fmt.Sprintf("action.command[%d] contains a `{{var}}` template — argv expansion is forbidden (leaks via `ps aux`); use action.stdin.parts[].template instead", i))
+		}
+	}
 	if r.Action.TimeoutMs <= 0 {
 		add(IssueError, fmt.Sprintf("action.timeout_ms must be > 0 (got %d)", r.Action.TimeoutMs))
+	}
+	if r.Action.Stdin != nil {
+		validateStdin(r.Action.Stdin, add)
 	}
 	for k := range r.Action.Env {
 		if !envVarNameRe.MatchString(k) {
@@ -381,4 +501,52 @@ func validateRule(r Rule) []ValidationIssue {
 		}
 	}
 	return out
+}
+
+// validateStdin checks the parts list: empty array is an error, unknown
+// template variables abort startup, and the slack_thread enum fields must
+// match the supported set.
+func validateStdin(s *StdinSpec, add func(ValidationIssueLevel, string)) {
+	if len(s.Parts) == 0 {
+		add(IssueError, "action.stdin.parts must contain at least one part")
+		return
+	}
+	for i, p := range s.Parts {
+		prefix := fmt.Sprintf("action.stdin.parts[%d]", i)
+		switch p.Kind {
+		case PartKindText:
+			// Literal text is unrestricted.
+		case PartKindTemplate:
+			for _, m := range anyTemplateRe.FindAllStringSubmatch(p.Template, -1) {
+				name := m[1]
+				if _, ok := knownTemplateVarsInRules[name]; !ok {
+					add(IssueError, fmt.Sprintf("%s.template references unknown variable {{%s}}", prefix, name))
+				}
+			}
+		case PartKindSlackThread:
+			st := p.SlackThread
+			if st == nil {
+				add(IssueError, prefix+".slack_thread body is empty")
+				break
+			}
+			if st.MaxMessages < 0 {
+				add(IssueError, fmt.Sprintf("%s.slack_thread.max_messages must be >= 0 (got %d)", prefix, st.MaxMessages))
+			}
+			if st.MaxBytes < 0 {
+				add(IssueError, fmt.Sprintf("%s.slack_thread.max_bytes must be >= 0 (got %d)", prefix, st.MaxBytes))
+			}
+			switch st.Format {
+			case "", "text", "jsonl":
+			default:
+				add(IssueError, fmt.Sprintf("%s.slack_thread.format must be \"text\" or \"jsonl\" (got %q)", prefix, st.Format))
+			}
+			switch st.OnFetchError {
+			case "", "fail", "fallback_event":
+			default:
+				add(IssueError, fmt.Sprintf("%s.slack_thread.on_fetch_error must be \"fail\" or \"fallback_event\" (got %q)", prefix, st.OnFetchError))
+			}
+		default:
+			add(IssueError, prefix+" has no recognized part variant")
+		}
+	}
 }

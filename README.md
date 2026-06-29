@@ -12,16 +12,44 @@ that prints to stdout can be wired up.
 
 1. A Slack event arrives over Socket Mode (`message` or `app_mention`).
 2. slackrun matches the event against the rules in `~/.config/slackrun/rules.yaml`.
-3. The configured command is spawned with the rule's `cwd`, environment, and
-   template-expanded argv.
-4. A `⏳ Working…` placeholder lands in a thread and updates every ~5s with
+3. If the matched rule declares an `action.stdin.parts` recipe, slackrun
+   resolves it — fetching the Slack thread and expanding template variables
+   — and pipes the result to the child's stdin.
+4. The configured command (fixed argv, no template expansion) is spawned
+   with the rule's `cwd` and environment.
+5. A `⏳ Working…` placeholder lands in a thread and updates every ~5s with
    elapsed time.
-5. On exit, the placeholder is overwritten with stdout (chunked across
+6. On exit, the placeholder is overwritten with stdout (chunked across
    multiple posts, or attached as a file, depending on length).
 
 The `cwd` and `command` cannot be supplied from a Slack message — only a
 matched rule can pick them. That is the main security boundary; see
 `docs/security.md`.
+
+## Feeding context to the child
+
+`action.stdin.parts` declaratively builds the byte stream slackrun pipes to
+the child's stdin. The most useful part type is `slack_thread:`, which
+triggers a `conversations.replies` fetch and renders the result wrapped in
+`<UNTRUSTED_SLACK_THREAD>` tags before the spawn:
+
+```yaml
+- name: mention-default
+  trigger: { type: app_mention }
+  action:
+    cwd: /Users/you
+    command: [claude, -p]           # claude reads prompt from stdin
+    timeout_ms: 900000
+    stdin:
+      parts:
+        - text: "Answer the user concisely.\n\n"
+        - slack_thread: {}          # default: max 50 msgs / 64 KiB
+```
+
+`text` / `template` / `slack_thread` parts compose in document order;
+`{{permalink}}` `{{text}}` `{{user}}` `{{channel}}` `{{rest}}` are available
+inside `template:`. See `docs/rules.md` for the full schema and security
+implications (thread bodies are untrusted).
 
 ## Write-back from the child
 
