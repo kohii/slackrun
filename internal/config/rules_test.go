@@ -585,6 +585,113 @@ rules:
 	}
 }
 
+func TestValidate_SlackrunHelpPartParses(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      expose_slack_token: true
+      stdin:
+        - slackrun_help: {}
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %+v", res.Issues)
+	}
+	parts := res.Rules[0].Action.Stdin
+	if len(parts) != 1 || parts[0].Kind != PartKindSlackrunHelp {
+		t.Fatalf("expected one slackrun_help part: %+v", parts)
+	}
+}
+
+func TestValidate_SlackrunHelpWithoutTokenWarns(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - slackrun_help: {}
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("expected warn-only, got errors: %+v", res.Issues)
+	}
+	var sawWarn bool
+	for _, i := range res.Issues {
+		if i.Level == IssueWarn && strings.Contains(i.Message, "slackrun_help") {
+			sawWarn = true
+		}
+	}
+	if !sawWarn {
+		t.Fatalf("expected slackrun_help warn: %+v", res.Issues)
+	}
+}
+
+func TestValidate_ReplyWithStdoutBool(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"true", "false"} {
+		value := value
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      reply_with_stdout: ` + value + `
+`
+			res := parseAndValidate(t, src)
+			if res.HasErrors() {
+				t.Fatalf("unexpected errors: %+v", res.Issues)
+			}
+			got := res.Rules[0].Action.ReplyWithStdout
+			if got == nil {
+				t.Fatal("expected pointer to be set when YAML provides a value")
+			}
+			want := value == "true"
+			if *got != want {
+				t.Errorf("got %v, want %v", *got, want)
+			}
+		})
+	}
+}
+
+func TestValidate_ReplyWithStdoutDefaultsTrue(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %+v", res.Issues)
+	}
+	if got := res.Rules[0].Action.ReplyWithStdout; got != nil {
+		t.Errorf("expected nil pointer when field omitted, got *%v", *got)
+	}
+	if !res.Rules[0].Action.ReplyWithStdoutEnabled() {
+		t.Error("ReplyWithStdoutEnabled should default to true")
+	}
+}
+
 func TestValidate_StdinEmptyArrayRejected(t *testing.T) {
 	t.Parallel()
 	src := `

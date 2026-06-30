@@ -6,6 +6,7 @@ import (
 
 	"github.com/kohii/slackrun/internal/config"
 	"github.com/kohii/slackrun/internal/dispatch"
+	"github.com/kohii/slackrun/internal/runner"
 	"github.com/kohii/slackrun/internal/slackthread"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -287,6 +288,51 @@ func TestFromAppMention_CarriesAttachments(t *testing.T) {
 	got := fromAppMention(e)
 	if len(got.Attachments) != 1 || got.Attachments[0].Title != "ctx" {
 		t.Errorf("attachment conversion failed: %+v", got.Attachments)
+	}
+}
+
+func TestDecideCompletion(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name            string
+		result          runner.Result
+		replyWithStdout bool
+		want            completionAction
+	}{
+		{"timeout beats everything", runner.Result{TimedOut: true}, true, completionTimeout},
+		{"not-found beats failure", runner.Result{NotFound: true, ExitCode: 1}, true, completionNotFound},
+		{"exit code != 0 → failed", runner.Result{ExitCode: 2}, true, completionFailed},
+		{"success default → post stdout", runner.Result{}, true, completionPostStdout},
+		{"success + reply disabled → mark done", runner.Result{}, false, completionMarkDone},
+		{"failure + reply disabled → still report failure", runner.Result{ExitCode: 1}, false, completionFailed},
+		{"timeout + reply disabled → still report timeout", runner.Result{TimedOut: true}, false, completionTimeout},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := decideCompletion(c.result, c.replyWithStdout); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestBuildStdinPayload_SlackrunHelpInjectsWriteUsage(t *testing.T) {
+	t.Parallel()
+	parts := []config.StdinPart{
+		{Kind: config.PartKindText, Text: "Lead:\n"},
+		{Kind: config.PartKindSlackrunHelp, SlackrunHelp: &config.SlackrunHelpSpec{}},
+	}
+	out := buildStdinPayload(stdinBuildInput{Parts: parts})
+	if !strings.HasPrefix(out, "Lead:\n") {
+		t.Errorf("missing text prefix: %q", out)
+	}
+	if !strings.Contains(out, "slackrun post") {
+		t.Errorf("expected write-CLI usage injected: %q", out)
+	}
+	if !strings.Contains(out, "slackrun react") || !strings.Contains(out, "slackrun upload") {
+		t.Errorf("expected all three subcommands in injected help: %q", out)
 	}
 }
 

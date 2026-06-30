@@ -19,8 +19,10 @@ that prints to stdout can be wired up.
    with the rule's `cwd` and environment.
 5. A `⏳ Working…` placeholder lands in a thread and updates every ~5s with
    elapsed time.
-6. On exit, the placeholder is overwritten with stdout (chunked across
-   multiple posts, or attached as a file, depending on length).
+6. On exit (by default), the placeholder is overwritten with stdout
+   (chunked across multiple posts, or attached as a file, depending on
+   length). Rules can set `action.reply_with_stdout: false` so the child
+   posts its own replies; the placeholder becomes `✅ Done` on success.
 
 The `cwd` and `command` cannot be supplied from a Slack message — only a
 matched rule can pick them. That is the main security boundary; see
@@ -35,6 +37,7 @@ matched rule can pick them. That is the main security boundary; see
 | `text:` | Author-written instructions. Trusted. |
 | `trigger_message:` | The Slack message that fired the rule, wrapped in `<UNTRUSTED_SLACK_MESSAGE>` tags. Max 1. |
 | `thread:` | The Slack thread the trigger lives in, wrapped in `<UNTRUSTED_SLACK_THREAD>` tags. Max 1. Renders empty (the whole part, including its optional `heading:`, disappears) when there is no thread. |
+| `slackrun_help: {}` | Injects `slackrun post/react/upload` usage so an LLM child can learn how to reply. Pairs with `expose_slack_token: true`. |
 
 ```yaml
 - name: mention-default
@@ -78,6 +81,10 @@ slackrun upload --file ./report.txt
 injected on every spawn. Pass `--channel` / `--ts` / `--thread-ts` explicitly
 to target a different message. Read `docs/security.md` before opting in — a
 child with the token can do anything the Bot scope allows.
+
+When the child posts its own replies, set `action.reply_with_stdout: false`
+so slackrun does not also dump stdout as a final reply. The progress
+message becomes `✅ Done` on success; failures still surface.
 
 ## Setup
 

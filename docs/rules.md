@@ -26,15 +26,20 @@ rules:
       timeout_ms: 600000          # required (milliseconds)
       env: { KEY: value }         # optional, extra env for the spawned process
       expose_slack_token: false   # optional; opt-in to forward SLACK_BOT_TOKEN
+      reply_with_stdout: true     # optional, default true; see "Reply mode" below
       stdin:                      # optional; ordered list of parts piped to stdin
         - text: "static instructions"
         - trigger_message: { content: command_text }
         - thread: { include_triggering_message: false }
+        - slackrun_help: {}       # inject write-CLI help text for the child
 ```
 
 `action.env` cannot set reserved keys: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
 `ALLOWED_USER_IDS`, `SLACKRUN_CHANNEL`, `SLACKRUN_TS`, `SLACKRUN_THREAD_TS`,
-`SLACKRUN_USER`. The first three are managed by `expose_slack_token`; the
+`SLACKRUN_USER`. `SLACK_BOT_TOKEN` is forwarded only when
+`expose_slack_token: true`; `SLACK_APP_TOKEN` and `ALLOWED_USER_IDS` are
+always stripped from the child's environment (Socket Mode and
+authorization are the parent's concerns, not the child's). The
 `SLACKRUN_*` ones are injected automatically with the triggering event's
 coordinates so the child can call `slackrun post|react|upload` without
 parsing arguments.
@@ -70,6 +75,7 @@ A part is exactly one of:
 | `text:` | Author-written instructions. Trusted content. May contain `{{event.*}}` metadata variables (see below). |
 | `trigger_message:` | The Slack message that triggered the rule, rendered as an untrusted block. Max 1 per rule. |
 | `thread:` | The Slack thread the triggering message lives in, rendered as an untrusted block. Max 1 per rule. |
+| `slackrun_help: {}` | Inject the static help for `slackrun post/react/upload`. Use when the child is an LLM that needs to learn how to reply. Pairs with `expose_slack_token: true`. |
 
 ### Trust boundary
 
@@ -206,6 +212,37 @@ When the triggering event is not in a thread, `thread:` renders as empty.
 The part vanishes, including any `heading`. There is no need to gate the
 part on "is there a thread?".
 
+### `slackrun_help:`
+
+Emits the same write-CLI help block that `slackrun -h` prints, so an LLM
+child can learn how to call back into slackrun for replies, reactions, and
+file uploads. Plain text, no wrapper tags — it is author-trusted
+documentation, not Slack-derived data.
+
+```yaml
+- slackrun_help: {}
+```
+
+Pairs with `action.expose_slack_token: true`: the documented subcommands
+need `SLACK_BOT_TOKEN` to reach the child. `slackrun check` warns when a
+rule includes `slackrun_help` without the token forwarding.
+
+## Reply mode
+
+`action.reply_with_stdout` (default `true`) controls how slackrun handles
+the child's stdout after a successful exit.
+
+| Value | Effect on success | Effect on failure |
+|---|---|---|
+| `true` (default) | Progress message is overwritten with the child's stdout (chunked across multiple posts, or attached as a file when long). | Progress message becomes `❌ Failed: exit N` with a tail of stderr. |
+| `false` | Progress message is updated to `✅ Done`. stdout is discarded (only its byte count appears in the slackrun log). The child is expected to have posted its own replies via `slackrun post`. | Same as default — failures still surface (with a tail of stderr), so silent crashes stay visible. |
+
+Set `reply_with_stdout: false` when the child program (typically an LLM
+session) needs to control reply timing or format itself — e.g. when it
+emits an intermediate status, then a final answer, both via
+`slackrun post`. Without this flag the child's full stdout would be
+re-posted as a third reply.
+
 ## Template variables (metadata only)
 
 The following expand inside `text:` parts:
@@ -319,6 +356,7 @@ Checks performed:
 - At most one `trigger_message:` and at most one `thread:` part per rule
 - `{{...}}` tokens appear only in `text:` parts
 - `{{event.*}}` tokens reference known metadata variables (body variables are rejected with a hint)
+- `slackrun_help:` is only used in rules that also set `expose_slack_token: true` (warning — the documented subcommands need the token)
 
 ## Dry run
 

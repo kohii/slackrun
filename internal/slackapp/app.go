@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kohii/slackrun/internal/clidoc"
 	"github.com/kohii/slackrun/internal/config"
 	"github.com/kohii/slackrun/internal/dispatch"
 	"github.com/kohii/slackrun/internal/logging"
@@ -361,18 +362,51 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		logging.F("stderrLen", len(result.Stderr)),
 	)
 
-	switch {
-	case result.TimedOut:
+	switch decideCompletion(result, rule.Action.ReplyWithStdoutEnabled()) {
+	case completionTimeout:
 		_ = progress.Update("⏱️ Timed out (" + util.FormatDuration(timeout) + ")")
-	case result.NotFound:
+	case completionNotFound:
 		_ = progress.Update("❌ Command not found: " + rule.Action.Command[0])
-	case result.ExitCode != 0:
+	case completionFailed:
 		_ = progress.Update(failureMessage(result))
-	default:
+	case completionMarkDone:
+		// The child has already posted its own replies (or chose to stay
+		// silent). Settle the progress placeholder so no `⏳ Working…` is
+		// left orphaned.
+		_ = progress.Update("✅ Done")
+	case completionPostStdout:
 		if err := PostCompletionReply(ctx, a.api, progress, threadTS, result.Stdout); err != nil {
 			logging.Error("post completion reply failed", logging.F("error", err), logging.F("rule", rule.Name))
 			_ = progress.Update("❌ Reply failed (see logs)")
 		}
+	}
+}
+
+// completionAction names what runMatched does with the progress message
+// when the child exits. Pure decision; the side effects (Slack write,
+// stdout posting) live in runMatched itself.
+type completionAction int
+
+const (
+	completionPostStdout completionAction = iota
+	completionMarkDone
+	completionTimeout
+	completionNotFound
+	completionFailed
+)
+
+func decideCompletion(r runner.Result, replyWithStdout bool) completionAction {
+	switch {
+	case r.TimedOut:
+		return completionTimeout
+	case r.NotFound:
+		return completionNotFound
+	case r.ExitCode != 0:
+		return completionFailed
+	case !replyWithStdout:
+		return completionMarkDone
+	default:
+		return completionPostStdout
 	}
 }
 
@@ -674,6 +708,9 @@ func buildStdinPayload(in stdinBuildInput) string {
 				Files:             slackthread.FilesMode(spec.Files),
 			})
 			writePartWithHeading(&sb, spec.Heading, body)
+
+		case config.PartKindSlackrunHelp:
+			sb.WriteString(clidoc.WriteUsage)
 		}
 	}
 	return sb.String()

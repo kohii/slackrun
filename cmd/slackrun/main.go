@@ -8,33 +8,16 @@ import (
 	"os"
 
 	"github.com/kohii/slackrun/internal/cli"
+	"github.com/kohii/slackrun/internal/clidoc"
 )
 
 // Version is overwritten at build time via:
 //   go build -ldflags="-X main.Version=v1.2.3" ./cmd/slackrun
 var Version = "dev"
 
-const usage = `slackrun — dispatch Slack events to local commands
-
-Dispatch:
-  slackrun start [<rules.yaml>]                 Run the bot
-  slackrun check <rules.yaml>                   Validate the rules file
-  slackrun dry-run <rules.yaml> --event <file>  Show what would match (no spawn)
-
-Write (called from spawned children; requires expose_slack_token: true on the rule):
-  slackrun post   [--channel C...] [--thread-ts T] --text TEXT    (--text - reads stdin)
-  slackrun react  [--channel C...] [--ts T] --emoji NAME
-  slackrun upload [--channel C...] [--thread-ts T] --file PATH [--title T] [--initial-comment T]
-  Channel/ts/thread_ts default to SLACKRUN_CHANNEL / SLACKRUN_TS / SLACKRUN_THREAD_TS,
-  which slackrun injects on every spawn.
-
-Misc:
-  slackrun version                              Print version
-`
-
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
+		fmt.Fprint(os.Stderr, clidoc.MainUsage)
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -53,10 +36,10 @@ func main() {
 	case "version", "--version", "-v":
 		fmt.Println(Version)
 	case "help", "--help", "-h":
-		fmt.Print(usage)
+		fmt.Print(clidoc.MainUsage)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown subcommand:", os.Args[1])
-		fmt.Fprint(os.Stderr, usage)
+		fmt.Fprint(os.Stderr, clidoc.MainUsage)
 		os.Exit(2)
 	}
 }

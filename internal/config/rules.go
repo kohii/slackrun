@@ -105,10 +105,26 @@ type Action struct {
 	// `rules.yaml` is the single place to audit which children get token
 	// access.
 	ExposeSlackToken bool `yaml:"expose_slack_token,omitempty"`
+	// ReplyWithStdout controls whether slackrun posts the child's stdout
+	// to the triggering Slack thread on success. Pointer so we can default
+	// to true while still detecting an explicit `false`:
+	//   nil / true  — current behaviour: progress message is overwritten
+	//                 with stdout (chunked or uploaded as a file).
+	//   false       — child takes full responsibility for replying (it can
+	//                 use `slackrun post` directly); the progress message
+	//                 is updated to "✅ Done" on success. Failures still
+	//                 surface in Slack so silent crashes stay visible.
+	ReplyWithStdout *bool `yaml:"reply_with_stdout,omitempty"`
 	// Stdin is an ordered list of parts. slackrun renders each part and
 	// concatenates the results into the byte stream piped to the child's
 	// stdin. Absent / nil means the child reads nothing.
 	Stdin []StdinPart `yaml:"stdin,omitempty"`
+}
+
+// ReplyWithStdoutEnabled returns the resolved reply-with-stdout setting.
+// Default is true (current behaviour); an explicit `false` opts out.
+func (a Action) ReplyWithStdoutEnabled() bool {
+	return a.ReplyWithStdout == nil || *a.ReplyWithStdout
 }
 
 // StdinPartKind discriminates the variants of StdinPart.
@@ -125,6 +141,12 @@ const (
 	// PartKindThread renders the thread the trigger lives in, wrapped in
 	// <UNTRUSTED_SLACK_THREAD_<nonce>> tags. At most one per rule.
 	PartKindThread
+	// PartKindSlackrunHelp injects clidoc.WriteUsage — the static help for
+	// the slackrun post / react / upload subcommands — into stdin. Useful
+	// when the spawned program is an LLM that needs to learn how to post
+	// back. Requires `expose_slack_token: true` on the rule (warning at
+	// load time if missing).
+	PartKindSlackrunHelp
 )
 
 // ContentMode selects which slice of the triggering message body lands in a
@@ -213,13 +235,21 @@ type ThreadSpec struct {
 	OnFetchError OnFetchErrorPolicy `yaml:"on_fetch_error,omitempty"`
 }
 
-// StdinPart is exactly one of `text`, `trigger_message`, or `thread`. The
-// strict unmarshaler enforces single-variant occupancy at load time.
+// SlackrunHelpSpec configures a `slackrun_help` stdin part. Currently no
+// fields; the struct exists so the YAML form `slackrun_help: {}` decodes
+// cleanly and so future options (e.g. selecting which subcommands to
+// document) have a home.
+type SlackrunHelpSpec struct{}
+
+// StdinPart is exactly one of `text`, `trigger_message`, `thread`, or
+// `slackrun_help`. The strict unmarshaler enforces single-variant
+// occupancy at load time.
 type StdinPart struct {
 	Kind           StdinPartKind
 	Text           string
 	TriggerMessage *TriggerMessageSpec
 	Thread         *ThreadSpec
+	SlackrunHelp   *SlackrunHelpSpec
 }
 
 // rawStdinPart is the strict-decode shadow used to detect "more than one
@@ -228,6 +258,7 @@ type rawStdinPart struct {
 	Text           *string             `yaml:"text,omitempty"`
 	TriggerMessage *TriggerMessageSpec `yaml:"trigger_message,omitempty"`
 	Thread         *ThreadSpec         `yaml:"thread,omitempty"`
+	SlackrunHelp   *SlackrunHelpSpec   `yaml:"slackrun_help,omitempty"`
 }
 
 // UnmarshalYAML decodes a part and ensures exactly one variant is set. The
@@ -248,13 +279,16 @@ func (p *StdinPart) UnmarshalYAML(node *yaml.Node) error {
 	if raw.Thread != nil {
 		set++
 	}
+	if raw.SlackrunHelp != nil {
+		set++
+	}
 	switch set {
 	case 0:
-		return errors.New("stdin part must set exactly one of: text, trigger_message, thread")
+		return errors.New("stdin part must set exactly one of: text, trigger_message, thread, slackrun_help")
 	case 1:
 		// ok
 	default:
-		return errors.New("stdin part must set only one of: text, trigger_message, thread")
+		return errors.New("stdin part must set only one of: text, trigger_message, thread, slackrun_help")
 	}
 	switch {
 	case raw.Text != nil:
@@ -266,6 +300,9 @@ func (p *StdinPart) UnmarshalYAML(node *yaml.Node) error {
 	case raw.Thread != nil:
 		p.Kind = PartKindThread
 		p.Thread = raw.Thread
+	case raw.SlackrunHelp != nil:
+		p.Kind = PartKindSlackrunHelp
+		p.SlackrunHelp = raw.SlackrunHelp
 	}
 	return nil
 }
@@ -537,7 +574,7 @@ func validateRule(r Rule) []ValidationIssue {
 		add(IssueError, fmt.Sprintf("action.timeout_ms must be > 0 (got %d)", r.Action.TimeoutMs))
 	}
 	if r.Action.Stdin != nil {
-		validateStdin(r.Action.Stdin, add)
+		validateStdin(r.Action.Stdin, r.Action.ExposeSlackToken, add)
 	}
 	for k := range r.Action.Env {
 		if !envVarNameRe.MatchString(k) {
@@ -587,13 +624,18 @@ func validateRule(r Rule) []ValidationIssue {
 // variables in `text:` parts are rejected with a hint, trigger_message /
 // thread parts must be unique, and enum fields must match the supported
 // set.
-func validateStdin(parts []StdinPart, add func(ValidationIssueLevel, string)) {
+//
+// exposeSlackToken is the rule's flag so we can warn when `slackrun_help`
+// is included without the token forwarding that makes the documented
+// subcommands actually usable.
+func validateStdin(parts []StdinPart, exposeSlackToken bool, add func(ValidationIssueLevel, string)) {
 	if len(parts) == 0 {
 		add(IssueError, "action.stdin must contain at least one part")
 		return
 	}
 	triggerMessageCount := 0
 	threadCount := 0
+	hasSlackrunHelp := false
 	for i, p := range parts {
 		prefix := fmt.Sprintf("action.stdin[%d]", i)
 		switch p.Kind {
@@ -605,6 +647,8 @@ func validateStdin(parts []StdinPart, add func(ValidationIssueLevel, string)) {
 		case PartKindThread:
 			threadCount++
 			validateThreadPart(p.Thread, prefix, add)
+		case PartKindSlackrunHelp:
+			hasSlackrunHelp = true
 		default:
 			add(IssueError, prefix+" has no recognized part variant")
 		}
@@ -614,6 +658,12 @@ func validateStdin(parts []StdinPart, add func(ValidationIssueLevel, string)) {
 	}
 	if threadCount > 1 {
 		add(IssueError, fmt.Sprintf("action.stdin has %d thread parts; at most one is allowed", threadCount))
+	}
+	if hasSlackrunHelp && !exposeSlackToken {
+		// The injected help documents subcommands that need
+		// SLACK_BOT_TOKEN. Without expose_slack_token: true the child will
+		// hit "missing token" the first time it tries to follow the help.
+		add(IssueWarn, "action.stdin contains a `slackrun_help` part but action.expose_slack_token is false — the documented subcommands will fail at runtime")
 	}
 }
 

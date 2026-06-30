@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/kohii/slackrun/internal/clidoc"
 	"github.com/kohii/slackrun/internal/config"
 	"github.com/kohii/slackrun/internal/dispatch"
 	"github.com/kohii/slackrun/internal/slackthread"
@@ -216,6 +217,9 @@ func renderStdinPreview(parts []config.StdinPart, vars dispatch.TemplateVars, ev
 				Files:             slackthread.FilesMode(spec.Files),
 			})
 			writePartWithHeading(&sb, spec.Heading, body)
+
+		case config.PartKindSlackrunHelp:
+			sb.WriteString(clidoc.WriteUsage)
 		}
 	}
 	return sb.String()
