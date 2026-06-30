@@ -1,24 +1,27 @@
 // Package dispatch turns a Slack event into a matched rule and the rendered
-// command argv that will be executed.
+// stdin payload that will be piped to the spawned command.
 package dispatch
 
 import "regexp"
 
-// TemplateVars captures everything a rule template can reference. Fields are
-// the names recognized inside `{{...}}`.
+// TemplateVars captures the metadata variables a `text:` stdin part can
+// reference. These are all opaque identifiers or URLs derived from the
+// event envelope — never Slack-authored body text. Body content reaches
+// the child only through `trigger_message` / `thread` parts, both of which
+// are XML-wrapped as untrusted by the renderer.
 type TemplateVars struct {
 	Permalink string
-	Text      string
-	Rest      string
-	Channel   string
-	User      string
+	ChannelID string
+	UserID    string
+	TS        string
+	ThreadTS  string
 }
 
-var templateVarRe = regexp.MustCompile(`\{\{\s*(permalink|text|rest|channel|user)\s*\}\}`)
+var templateVarRe = regexp.MustCompile(`\{\{\s*(event\.permalink|event\.channel_id|event\.user_id|event\.ts|event\.thread_ts)\s*\}\}`)
 
-// ExpandTemplate replaces `{{var}}` placeholders. Unknown names are left
-// untouched (they will surface in dry-run output and logs, which is the cue
-// to fix the rule).
+// ExpandTemplate replaces `{{event.*}}` placeholders. Unknown names are
+// left untouched; the config loader rejects them at load time so reaching
+// ExpandTemplate with one means the loader was bypassed (e.g. tests).
 func ExpandTemplate(template string, vars TemplateVars) string {
 	return templateVarRe.ReplaceAllStringFunc(template, func(match string) string {
 		groups := templateVarRe.FindStringSubmatch(match)
@@ -26,24 +29,24 @@ func ExpandTemplate(template string, vars TemplateVars) string {
 			return match
 		}
 		switch groups[1] {
-		case "permalink":
+		case "event.permalink":
 			return vars.Permalink
-		case "text":
-			return vars.Text
-		case "rest":
-			return vars.Rest
-		case "channel":
-			return vars.Channel
-		case "user":
-			return vars.User
+		case "event.channel_id":
+			return vars.ChannelID
+		case "event.user_id":
+			return vars.UserID
+		case "event.ts":
+			return vars.TS
+		case "event.thread_ts":
+			return vars.ThreadTS
 		}
 		return match
 	})
 }
 
-// TemplateVarsUsed lists the placeholders referenced by a template. Used by
-// dry-run output and to decide whether to resolve `chat.getPermalink` (a
-// network call) at job start.
+// TemplateVarsUsed lists the variable names referenced by a template
+// string. Used by dry-run output and to decide whether the permalink fetch
+// (a Slack API call) is needed.
 func TemplateVarsUsed(template string) []string {
 	matches := templateVarRe.FindAllStringSubmatch(template, -1)
 	seen := map[string]bool{}
@@ -61,7 +64,7 @@ func TemplateVarsUsed(template string) []string {
 // allocate per-event for the common "does this rule need permalink?" check.
 func TemplateUsesPermalink(template string) bool {
 	for _, v := range TemplateVarsUsed(template) {
-		if v == "permalink" {
+		if v == "event.permalink" {
 			return true
 		}
 	}

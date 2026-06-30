@@ -91,9 +91,9 @@ func (t *Trigger) UnmarshalYAML(node *yaml.Node) error {
 
 // Action is the side-effect of a matched rule. `Command` is an argv (no
 // shell): `;` `$(...)` and backticks are inert, and `{{...}}` tokens are
-// rejected at load time. Send the template-expanded prompt to the child via
-// `Stdin.Parts` instead — that path keeps untrusted thread content off the
-// process's argv where it would otherwise be visible to `ps aux`.
+// rejected at load time. Variable content reaches the child only through
+// `Stdin` (a `text:` part), so it never lands on argv where it would be
+// visible to `ps aux`.
 type Action struct {
 	Cwd       string            `yaml:"cwd"`
 	Command   []string          `yaml:"command"`
@@ -105,16 +105,10 @@ type Action struct {
 	// `rules.yaml` is the single place to audit which children get token
 	// access.
 	ExposeSlackToken bool `yaml:"expose_slack_token,omitempty"`
-	// Stdin declaratively builds the byte stream slackrun pipes to the
-	// child's stdin. Optional; absent means the child reads nothing.
-	Stdin *StdinSpec `yaml:"stdin,omitempty"`
-}
-
-// StdinSpec is the declarative recipe for the child's stdin payload.
-// Currently a thin wrapper over Parts so future top-level options (e.g.
-// `redact: true`) can be added without breaking the part schema.
-type StdinSpec struct {
-	Parts []StdinPart `yaml:"parts"`
+	// Stdin is an ordered list of parts. slackrun renders each part and
+	// concatenates the results into the byte stream piped to the child's
+	// stdin. Absent / nil means the child reads nothing.
+	Stdin []StdinPart `yaml:"stdin,omitempty"`
 }
 
 // StdinPartKind discriminates the variants of StdinPart.
@@ -122,53 +116,123 @@ type StdinPartKind int
 
 const (
 	PartKindUnknown StdinPartKind = iota
+	// PartKindText is author-written instructions. Trusted. May contain
+	// {{event.*}} metadata variable references.
 	PartKindText
-	PartKindTemplate
-	PartKindSlackThread
+	// PartKindTriggerMessage renders the message that fired the rule, wrapped
+	// in <UNTRUSTED_SLACK_MESSAGE_<nonce>> tags. At most one per rule.
+	PartKindTriggerMessage
+	// PartKindThread renders the thread the trigger lives in, wrapped in
+	// <UNTRUSTED_SLACK_THREAD_<nonce>> tags. At most one per rule.
+	PartKindThread
 )
 
-// StdinPart is exactly one of `text`, `template`, or `slack_thread`. The
-// strict unmarshaler enforces single-variant occupancy at load time.
-type StdinPart struct {
-	Kind        StdinPartKind
-	Text        string
-	Template    string
-	SlackThread *SlackThreadSpec
+// ContentMode selects which slice of the triggering message body lands in a
+// TriggerMessage part. Empty resolves to ContentCommandText.
+type ContentMode string
+
+const (
+	// ContentCommandText strips both the bot mention and any matched keyword
+	// from app_mention bodies. For message-type triggers, equivalent to
+	// ContentRawText.
+	ContentCommandText ContentMode = "command_text"
+	// ContentBodyText strips the bot mention but keeps the keyword. For
+	// message-type triggers, equivalent to ContentRawText.
+	ContentBodyText ContentMode = "body_text"
+	// ContentRawText is the Slack event `text` verbatim.
+	ContentRawText ContentMode = "raw_text"
+)
+
+// FilesMode selects how file attachments are rendered inside a Slack-derived
+// block. Empty resolves to FilesNone.
+type FilesMode string
+
+const (
+	FilesNone FilesMode = "none"
+	// FilesLink renders each attachment as
+	// `[file: name.ext url=https://files.slack.com/…]` after the message body.
+	// Slack file URLs are token-gated; the link is a reference, not a
+	// guaranteed-fetchable URL.
+	FilesLink FilesMode = "link"
+)
+
+// OnFetchErrorPolicy controls what happens when conversations.replies fails
+// for a Thread part.
+type OnFetchErrorPolicy string
+
+const (
+	// OnFetchErrorFail aborts the spawn and posts a failure message to the
+	// triggering thread.
+	OnFetchErrorFail OnFetchErrorPolicy = "fail"
+	// OnFetchErrorOmit makes the part render empty (the whole part, including
+	// any heading, vanishes from stdin).
+	OnFetchErrorOmit OnFetchErrorPolicy = "omit"
+)
+
+// TriggerMessageSpec configures a `trigger_message` stdin part. All fields
+// are optional; zero values yield the documented defaults.
+type TriggerMessageSpec struct {
+	// Heading is a free-text label rendered on its own line before the
+	// wrapper tag. If the part renders empty, the heading disappears with it.
+	// `{{...}}` tokens are rejected here — heading is a static label.
+	Heading string `yaml:"heading,omitempty"`
+	// Content selects which slice of the message body to include. Defaults
+	// to ContentCommandText.
+	Content ContentMode `yaml:"content,omitempty"`
+	// IncludeTimestamps adds a human-readable timestamp next to the speaker
+	// tag inside the wrapper. The ts field is always present regardless.
+	IncludeTimestamps bool `yaml:"include_timestamps,omitempty"`
+	// Files chooses how to render file attachments. Defaults to FilesNone.
+	Files FilesMode `yaml:"files,omitempty"`
 }
 
-// SlackThreadSpec configures a `slack_thread` stdin part.
-//
-// MaxMessages / MaxBytes default to slackthread package defaults if zero;
-// callers should pass them through unchanged so the resolution lives in one
-// place.
-type SlackThreadSpec struct {
-	MaxMessages  int    `yaml:"max_messages,omitempty"`
-	MaxBytes     int    `yaml:"max_bytes,omitempty"`
-	Format       string `yaml:"format,omitempty"`         // "text" (default) | "jsonl"
-	OnFetchError string `yaml:"on_fetch_error,omitempty"` // "fail" (default) | "fallback_event"
-	// ExcludeTriggeringMessage drops the message whose ts equals the
-	// triggering event's ts from the rendered thread. Pairs naturally with
-	// a leading `template: "{{text}}\n\n"` part so the latest mention shows
-	// once at the top and the rest of the thread (if any) shows below.
-	//
-	// Slack-side TS equality is the entire matching rule; edited or
-	// `message_changed`-derived events are not in scope. When the filtered
-	// result is empty, the slack_thread part contributes the empty string
-	// (no wrapper tags).
-	ExcludeTriggeringMessage bool `yaml:"exclude_triggering_message,omitempty"`
+// ThreadSpec configures a `thread` stdin part.
+type ThreadSpec struct {
+	// Heading is a free-text label rendered on its own line before the
+	// wrapper tag. If the part renders empty (e.g. standalone mention with
+	// IncludeTriggeringMessage: false, or fetch failure under
+	// OnFetchError: omit), the heading disappears with it.
+	Heading string `yaml:"heading,omitempty"`
+	// IncludeTriggeringMessage controls whether the message whose ts matches
+	// the triggering event's ts is kept in the rendered thread. Default
+	// false: the typical pattern pairs a `trigger_message` part for the
+	// latest message with a `thread` part for prior context only.
+	IncludeTriggeringMessage bool `yaml:"include_triggering_message,omitempty"`
+	// MaxMessages / MaxBytes default to slackthread package defaults if zero.
+	MaxMessages int `yaml:"max_messages,omitempty"`
+	MaxBytes    int `yaml:"max_bytes,omitempty"`
+	// Format selects "text" (default, human-readable speaker tags) or
+	// "jsonl" (one JSON object per line). Wrapper tags are emitted in both.
+	Format string `yaml:"format,omitempty"`
+	// IncludeTimestamps adds human-readable timestamps to each message.
+	IncludeTimestamps bool `yaml:"include_timestamps,omitempty"`
+	// Files chooses how to render file attachments per message.
+	Files FilesMode `yaml:"files,omitempty"`
+	// OnFetchError controls behaviour when conversations.replies fails.
+	// Defaults to OnFetchErrorFail.
+	OnFetchError OnFetchErrorPolicy `yaml:"on_fetch_error,omitempty"`
+}
+
+// StdinPart is exactly one of `text`, `trigger_message`, or `thread`. The
+// strict unmarshaler enforces single-variant occupancy at load time.
+type StdinPart struct {
+	Kind           StdinPartKind
+	Text           string
+	TriggerMessage *TriggerMessageSpec
+	Thread         *ThreadSpec
 }
 
 // rawStdinPart is the strict-decode shadow used to detect "more than one
 // variant present" cases.
 type rawStdinPart struct {
-	Text        *string          `yaml:"text,omitempty"`
-	Template    *string          `yaml:"template,omitempty"`
-	SlackThread *SlackThreadSpec `yaml:"slack_thread,omitempty"`
+	Text           *string             `yaml:"text,omitempty"`
+	TriggerMessage *TriggerMessageSpec `yaml:"trigger_message,omitempty"`
+	Thread         *ThreadSpec         `yaml:"thread,omitempty"`
 }
 
 // UnmarshalYAML decodes a part and ensures exactly one variant is set. The
-// surrounding loader then validates contents (template var names, format
-// enum, etc.).
+// surrounding loader then validates contents (template var names, enum
+// fields, etc.).
 func (p *StdinPart) UnmarshalYAML(node *yaml.Node) error {
 	var raw rawStdinPart
 	if err := node.Decode(&raw); err != nil {
@@ -178,30 +242,30 @@ func (p *StdinPart) UnmarshalYAML(node *yaml.Node) error {
 	if raw.Text != nil {
 		set++
 	}
-	if raw.Template != nil {
+	if raw.TriggerMessage != nil {
 		set++
 	}
-	if raw.SlackThread != nil {
+	if raw.Thread != nil {
 		set++
 	}
 	switch set {
 	case 0:
-		return errors.New("stdin part must set exactly one of: text, template, slack_thread")
+		return errors.New("stdin part must set exactly one of: text, trigger_message, thread")
 	case 1:
 		// ok
 	default:
-		return errors.New("stdin part must set only one of: text, template, slack_thread")
+		return errors.New("stdin part must set only one of: text, trigger_message, thread")
 	}
 	switch {
 	case raw.Text != nil:
 		p.Kind = PartKindText
 		p.Text = *raw.Text
-	case raw.Template != nil:
-		p.Kind = PartKindTemplate
-		p.Template = *raw.Template
-	case raw.SlackThread != nil:
-		p.Kind = PartKindSlackThread
-		p.SlackThread = raw.SlackThread
+	case raw.TriggerMessage != nil:
+		p.Kind = PartKindTriggerMessage
+		p.TriggerMessage = raw.TriggerMessage
+	case raw.Thread != nil:
+		p.Kind = PartKindThread
+		p.Thread = raw.Thread
 	}
 	return nil
 }
@@ -242,8 +306,6 @@ type CheckOptions struct {
 	SkipFsChecks bool
 }
 
-// nameRe constrains rule.name to identifier-ish characters so the value is
-// safe in logs and metric labels.
 var (
 	nameRe       = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 	channelIDRe  = regexp.MustCompile(`^[CG][A-Z0-9]{2,}$`)
@@ -252,19 +314,42 @@ var (
 	envVarNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
 
 	// anyTemplateRe matches any `{{name}}` token in a config string. Kept
-	// independent of the dispatch package's recognized-name regex so that
-	// rules loader stays free of cycles, and so a typo like `{{texts}}` is
-	// rejected here without needing to round-trip through expansion.
+	// independent of the dispatch package's recognized-name regex so the
+	// rules loader stays cycle-free and so a typo like `{{event.permalinks}}`
+	// is rejected here without needing to round-trip through expansion.
 	anyTemplateRe = regexp.MustCompile(`\{\{\s*([^{}\s]+)\s*\}\}`)
 
 	// knownTemplateVarsInRules lists the variables that may appear inside a
-	// `template` stdin part. Keep in sync with dispatch.ExpandTemplate.
+	// `text:` part. Strictly metadata — opaque identifiers / URLs — so the
+	// trust boundary between author-written instructions and Slack-derived
+	// content stays intact. Body variables route through trigger_message.
+	// Keep in sync with dispatch.ExpandTemplate.
 	knownTemplateVarsInRules = map[string]struct{}{
-		"permalink": {},
-		"text":      {},
-		"rest":      {},
-		"channel":   {},
-		"user":      {},
+		"event.permalink":  {},
+		"event.channel_id": {},
+		"event.user_id":    {},
+		"event.ts":         {},
+		"event.thread_ts":  {},
+	}
+
+	// legacyVarHints maps a removed variable name to a hint for the rule
+	// author. Surfaces at load time so half-remembered old syntax does not
+	// silently no-op. Both bare (`text`) and namespaced (`event.text`)
+	// forms are covered.
+	legacyVarHints = map[string]string{
+		"text":           "use a `trigger_message` part (content: command_text is the default)",
+		"rest":           "use a `trigger_message` part (content: command_text is the default)",
+		"body":           "use a `trigger_message` part with content: body_text",
+		"raw_text":       "use a `trigger_message` part with content: raw_text",
+		"user":           "use {{event.user_id}}",
+		"channel":        "use {{event.channel_id}}",
+		"permalink":      "use {{event.permalink}}",
+		"ts":             "use {{event.ts}}",
+		"thread_ts":      "use {{event.thread_ts}}",
+		"event.text":     "use a `trigger_message` part (content: command_text is the default)",
+		"event.rest":     "use a `trigger_message` part (content: command_text is the default)",
+		"event.body":     "use a `trigger_message` part with content: body_text",
+		"event.raw_text": "use a `trigger_message` part with content: raw_text",
 	}
 )
 
@@ -323,14 +408,10 @@ func LoadRulesFile(path string, opts CheckOptions) (ValidationResult, error) {
 func ValidateRules(rules []Rule, opts CheckOptions) []ValidationIssue {
 	var issues []ValidationIssue
 
-	// Per-rule shape checks (the schema layer rejects unknown fields but does
-	// not validate inter-field constraints like "from must list at least one
-	// id type").
 	for _, r := range rules {
 		issues = append(issues, validateRule(r)...)
 	}
 
-	// Duplicate rule names — show up in logs / dry-run / future metrics.
 	nameCount := map[string]int{}
 	for _, r := range rules {
 		nameCount[r.Name]++
@@ -344,7 +425,6 @@ func ValidateRules(rules []Rule, opts CheckOptions) []ValidationIssue {
 		}
 	}
 
-	// app_mention: at most one keyword-less default rule.
 	var defaults []string
 	for _, r := range rules {
 		if r.Trigger.Type == TriggerTypeAppMention && r.Trigger.Keyword == nil {
@@ -358,8 +438,6 @@ func ValidateRules(rules []Rule, opts CheckOptions) []ValidationIssue {
 		})
 	}
 
-	// Duplicate keywords (case-insensitive) — first match wins so silent
-	// shadowing is bad UX.
 	keywordSeen := map[string]string{}
 	for _, r := range rules {
 		if r.Trigger.Type != TriggerTypeAppMention || r.Trigger.Keyword == nil {
@@ -377,8 +455,6 @@ func ValidateRules(rules []Rule, opts CheckOptions) []ValidationIssue {
 		}
 	}
 
-	// Channel overlap warning — multiple message rules on the same channel
-	// silently make every rule but the first dead.
 	chanToRules := map[string][]string{}
 	for _, r := range rules {
 		if r.Trigger.Type != TriggerTypeMessage {
@@ -395,8 +471,6 @@ func ValidateRules(rules []Rule, opts CheckOptions) []ValidationIssue {
 		}
 	}
 
-	// cwd existence — easy to miss on a fresh machine and the failure mode is
-	// silent (exec returns ENOENT). Check at load time.
 	if !opts.SkipFsChecks {
 		for _, r := range rules {
 			st, err := os.Stat(r.Action.Cwd)
@@ -441,7 +515,6 @@ func validateRule(r Rule) []ValidationIssue {
 		add(IssueError, fmt.Sprintf("rule.name %q must match [a-zA-Z0-9_-]+", r.Name))
 	}
 
-	// Action checks
 	if r.Action.Cwd == "" {
 		add(IssueError, "action.cwd is required")
 	} else if !filepath.IsAbs(r.Action.Cwd) {
@@ -452,14 +525,12 @@ func validateRule(r Rule) []ValidationIssue {
 	} else if strings.TrimSpace(r.Action.Command[0]) == "" {
 		add(IssueError, "action.command[0] (program) is empty")
 	}
-	// `{{var}}` in argv is rejected because the expanded value lands on the
-	// child process's argv where it is visible to `ps aux` (and bounded by
-	// ARG_MAX). Use `action.stdin.parts[].template` for variable substitution
-	// — that path pipes into the child's stdin, which is invisible to
-	// process listings.
+	// `{{var}}` in argv is rejected because the expanded value would land on
+	// the child's argv where it is visible to `ps aux`. Route variable
+	// content through a `text:` stdin part instead.
 	for i, arg := range r.Action.Command {
 		if anyTemplateRe.MatchString(arg) {
-			add(IssueError, fmt.Sprintf("action.command[%d] contains a `{{var}}` template — argv expansion is forbidden (leaks via `ps aux`); use action.stdin.parts[].template instead", i))
+			add(IssueError, fmt.Sprintf("action.command[%d] contains a `{{var}}` token — argv expansion is forbidden (leaks via `ps aux`); use a `text:` stdin part instead", i))
 		}
 	}
 	if r.Action.TimeoutMs <= 0 {
@@ -477,7 +548,6 @@ func validateRule(r Rule) []ValidationIssue {
 		}
 	}
 
-	// Trigger checks
 	switch r.Trigger.Type {
 	case TriggerTypeMessage:
 		if !channelIDRe.MatchString(r.Trigger.Channel) {
@@ -513,57 +583,101 @@ func validateRule(r Rule) []ValidationIssue {
 	return out
 }
 
-// validateStdin checks the parts list: empty array is an error, unknown
-// template variables abort startup, and the slack_thread enum fields must
-// match the supported set.
-func validateStdin(s *StdinSpec, add func(ValidationIssueLevel, string)) {
-	if len(s.Parts) == 0 {
-		add(IssueError, "action.stdin.parts must contain at least one part")
+// validateStdin checks the parts list: empty array is an error, body
+// variables in `text:` parts are rejected with a hint, trigger_message /
+// thread parts must be unique, and enum fields must match the supported
+// set.
+func validateStdin(parts []StdinPart, add func(ValidationIssueLevel, string)) {
+	if len(parts) == 0 {
+		add(IssueError, "action.stdin must contain at least one part")
 		return
 	}
-	for i, p := range s.Parts {
-		prefix := fmt.Sprintf("action.stdin.parts[%d]", i)
+	triggerMessageCount := 0
+	threadCount := 0
+	for i, p := range parts {
+		prefix := fmt.Sprintf("action.stdin[%d]", i)
 		switch p.Kind {
 		case PartKindText:
-			// Literal text is unrestricted.
-		case PartKindTemplate:
-			for _, m := range anyTemplateRe.FindAllStringSubmatch(p.Template, -1) {
-				name := m[1]
-				if _, ok := knownTemplateVarsInRules[name]; !ok {
-					add(IssueError, fmt.Sprintf("%s.template references unknown variable {{%s}}", prefix, name))
-				}
-			}
-		case PartKindSlackThread:
-			st := p.SlackThread
-			if st == nil {
-				add(IssueError, prefix+".slack_thread body is empty")
-				break
-			}
-			if st.MaxMessages < 0 {
-				add(IssueError, fmt.Sprintf("%s.slack_thread.max_messages must be >= 0 (got %d)", prefix, st.MaxMessages))
-			}
-			if st.MaxBytes < 0 {
-				add(IssueError, fmt.Sprintf("%s.slack_thread.max_bytes must be >= 0 (got %d)", prefix, st.MaxBytes))
-			}
-			switch st.Format {
-			case "", "text", "jsonl":
-			default:
-				add(IssueError, fmt.Sprintf("%s.slack_thread.format must be \"text\" or \"jsonl\" (got %q)", prefix, st.Format))
-			}
-			switch st.OnFetchError {
-			case "", "fail", "fallback_event":
-			default:
-				add(IssueError, fmt.Sprintf("%s.slack_thread.on_fetch_error must be \"fail\" or \"fallback_event\" (got %q)", prefix, st.OnFetchError))
-			}
-			if st.ExcludeTriggeringMessage && st.OnFetchError == "fallback_event" {
-				// The synthesized fallback thread is the triggering message
-				// itself; excluding it leaves the part empty, defeating the
-				// fallback. Warn rather than error so the combination is
-				// still possible if it ever becomes meaningful.
-				add(IssueWarn, prefix+".slack_thread: exclude_triggering_message=true with on_fetch_error=fallback_event yields an empty fallback (the synthesized message is the trigger itself)")
-			}
+			validateTextPart(p.Text, prefix, add)
+		case PartKindTriggerMessage:
+			triggerMessageCount++
+			validateTriggerMessagePart(p.TriggerMessage, prefix, add)
+		case PartKindThread:
+			threadCount++
+			validateThreadPart(p.Thread, prefix, add)
 		default:
 			add(IssueError, prefix+" has no recognized part variant")
 		}
+	}
+	if triggerMessageCount > 1 {
+		add(IssueError, fmt.Sprintf("action.stdin has %d trigger_message parts; at most one is allowed", triggerMessageCount))
+	}
+	if threadCount > 1 {
+		add(IssueError, fmt.Sprintf("action.stdin has %d thread parts; at most one is allowed", threadCount))
+	}
+}
+
+func validateTextPart(text, prefix string, add func(ValidationIssueLevel, string)) {
+	for _, m := range anyTemplateRe.FindAllStringSubmatch(text, -1) {
+		name := m[1]
+		if _, ok := knownTemplateVarsInRules[name]; ok {
+			continue
+		}
+		if hint, ok := legacyVarHints[name]; ok {
+			add(IssueError, fmt.Sprintf("%s.text references {{%s}} — that variable was removed; %s", prefix, name, hint))
+			continue
+		}
+		add(IssueError, fmt.Sprintf("%s.text references unknown variable {{%s}}", prefix, name))
+	}
+}
+
+func validateTriggerMessagePart(spec *TriggerMessageSpec, prefix string, add func(ValidationIssueLevel, string)) {
+	if spec == nil {
+		// `trigger_message: {}` is valid and decodes to an empty struct;
+		// `trigger_message:` (nil literal) reaches here.
+		return
+	}
+	if anyTemplateRe.MatchString(spec.Heading) {
+		add(IssueError, prefix+".trigger_message.heading must not contain `{{var}}` tokens (emit a `text:` part for computed content)")
+	}
+	switch spec.Content {
+	case "", ContentCommandText, ContentBodyText, ContentRawText:
+	default:
+		add(IssueError, fmt.Sprintf("%s.trigger_message.content must be \"command_text\", \"body_text\", or \"raw_text\" (got %q)", prefix, spec.Content))
+	}
+	switch spec.Files {
+	case "", FilesNone, FilesLink:
+	default:
+		add(IssueError, fmt.Sprintf("%s.trigger_message.files must be \"none\" or \"link\" (got %q)", prefix, spec.Files))
+	}
+}
+
+func validateThreadPart(spec *ThreadSpec, prefix string, add func(ValidationIssueLevel, string)) {
+	if spec == nil {
+		return
+	}
+	if anyTemplateRe.MatchString(spec.Heading) {
+		add(IssueError, prefix+".thread.heading must not contain `{{var}}` tokens (emit a `text:` part for computed content)")
+	}
+	if spec.MaxMessages < 0 {
+		add(IssueError, fmt.Sprintf("%s.thread.max_messages must be >= 0 (got %d)", prefix, spec.MaxMessages))
+	}
+	if spec.MaxBytes < 0 {
+		add(IssueError, fmt.Sprintf("%s.thread.max_bytes must be >= 0 (got %d)", prefix, spec.MaxBytes))
+	}
+	switch spec.Format {
+	case "", "text", "jsonl":
+	default:
+		add(IssueError, fmt.Sprintf("%s.thread.format must be \"text\" or \"jsonl\" (got %q)", prefix, spec.Format))
+	}
+	switch spec.Files {
+	case "", FilesNone, FilesLink:
+	default:
+		add(IssueError, fmt.Sprintf("%s.thread.files must be \"none\" or \"link\" (got %q)", prefix, spec.Files))
+	}
+	switch spec.OnFetchError {
+	case "", OnFetchErrorFail, OnFetchErrorOmit:
+	default:
+		add(IssueError, fmt.Sprintf("%s.thread.on_fetch_error must be \"fail\" or \"omit\" (got %q)", prefix, spec.OnFetchError))
 	}
 }

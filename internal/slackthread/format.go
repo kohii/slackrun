@@ -3,26 +3,27 @@ package slackthread
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
-// Wrapping tags. We mark the body explicitly as untrusted so a downstream AI
-// can be instructed to treat instructions inside as data rather than orders.
-// The tag wording is intentionally verbose and English-only to be visible in
-// any Anthropic / OpenAI prompt-injection mitigation playbook.
+// Wrapping tag names. The nonce suffix appended by Render* prevents a
+// hostile Slack body from forging a closing tag — a body that writes the
+// literal `</UNTRUSTED_SLACK_THREAD>` cannot guess the suffix.
 const (
-	BeginTag = "<UNTRUSTED_SLACK_THREAD>"
-	EndTag   = "</UNTRUSTED_SLACK_THREAD>"
+	MessageTagBase = "UNTRUSTED_SLACK_MESSAGE"
+	ThreadTagBase  = "UNTRUSTED_SLACK_THREAD"
 )
 
-// Defaults for FormatOptions zero values.
+// Defaults for RenderOptions zero values.
 const (
 	DefaultMaxMessages = 50
 	DefaultMaxBytes    = 64 * 1024
 )
 
-// Format selects the output shape of Format().
+// Format selects the output shape inside the wrapper.
 type Format string
 
 const (
@@ -30,60 +31,101 @@ const (
 	FormatJSONL Format = "jsonl"
 )
 
-// FormatOptions configures Format(). Zero-values resolve to package defaults.
-type FormatOptions struct {
-	Format      Format
-	MaxMessages int
-	MaxBytes    int
+// FilesMode selects how Files attachments are rendered. Empty resolves to
+// FilesNone.
+type FilesMode string
+
+const (
+	FilesNone FilesMode = "none"
+	// FilesLink renders each file as `[file: name url=…]` (text format) or as
+	// a JSON array element (jsonl format). The URL is the Slack file URL,
+	// which is token-gated.
+	FilesLink FilesMode = "link"
+)
+
+// RenderOptions configures Render*. Zero-values resolve to documented
+// defaults. Nonce is appended to the wrapper tag name; empty means no
+// suffix (useful for tests).
+type RenderOptions struct {
+	Nonce             string
+	Format            Format
+	MaxMessages       int
+	MaxBytes          int
+	IncludeTimestamps bool
+	Files             FilesMode
 }
 
-// Render produces the formatted thread context with BEGIN/END tags. The
-// returned string is suitable for piping to a child's stdin (or composing
-// into a larger prompt). Parent is always retained; tail messages are
-// preferred when truncation is necessary because the most recent context is
-// usually the most relevant.
+// RenderThread produces the formatted thread context wrapped in
+// <UNTRUSTED_SLACK_THREAD_<nonce>> tags. Returns the empty string when msgs
+// is empty so the caller can elide the surrounding heading from stdin.
 //
-// If MaxBytes is so small that even the wrapping tags do not fit, Render
-// returns the empty wrapper unchanged — there is no useful subset to emit.
-func Render(msgs []Message, opts FormatOptions) string {
+// Parent is always retained; tail messages are preferred when truncation is
+// necessary because the most recent context is usually the most relevant.
+// If MaxBytes is so small that even the wrapping tags do not fit, returns
+// the empty wrapper unchanged.
+func RenderThread(msgs []Message, opts RenderOptions) string {
+	if len(msgs) == 0 {
+		return ""
+	}
 	if opts.MaxMessages <= 0 {
 		opts.MaxMessages = DefaultMaxMessages
 	}
 	if opts.MaxBytes <= 0 {
 		opts.MaxBytes = DefaultMaxBytes
 	}
-	fmtr := pickFormatter(opts.Format)
+	fmtr := pickFormatter(opts.Format, opts.IncludeTimestamps, opts.Files)
+	wrap := threadWrapper(opts.Nonce)
 
 	empty := wrap("")
 	if opts.MaxBytes < len(empty) {
-		// Cap is too small to fit even the wrapping tags. Returning the
-		// empty wrapper is the closest in-spec output.
-		return empty
-	}
-	if len(msgs) == 0 {
 		return empty
 	}
 
-	// Step 1: cap message count. Parent + last (N-1) gets us within bounds.
 	pre, omittedCount := capMessages(msgs, opts.MaxMessages)
 
-	// Step 2: try rendering everything we kept. The common path: nothing to do.
 	body := renderBody(pre, omittedCount, fmtr)
 	wrapped := wrap(body)
 	if len(wrapped) <= opts.MaxBytes {
 		return wrapped
 	}
 
-	// Step 3: byte cap exceeded. Keep parent + as many tail messages as fit,
-	// with a marker for the gap.
-	return shrinkToFit(pre, omittedCount, fmtr, opts.MaxBytes)
+	return shrinkToFit(pre, omittedCount, fmtr, wrap, opts.MaxBytes)
 }
 
-func wrap(body string) string {
-	if body == "" {
-		return BeginTag + "\n" + EndTag + "\n"
+// RenderTriggerMessage produces a single-message render wrapped in
+// <UNTRUSTED_SLACK_MESSAGE_<nonce>> tags. Always non-empty: even when the
+// body is empty (e.g. command_text mode on a `@bot`-only mention), the
+// wrapper itself signals the presence of the triggering message.
+func RenderTriggerMessage(msg Message, opts RenderOptions) string {
+	fmtr := pickFormatter(opts.Format, opts.IncludeTimestamps, opts.Files)
+	wrap := messageWrapper(opts.Nonce)
+	return wrap(fmtr.formatOne(msg))
+}
+
+func threadWrapper(nonce string) func(string) string {
+	open, close := tagPair(ThreadTagBase, nonce)
+	return wrapperFn(open, close)
+}
+
+func messageWrapper(nonce string) func(string) string {
+	open, close := tagPair(MessageTagBase, nonce)
+	return wrapperFn(open, close)
+}
+
+func tagPair(base, nonce string) (open, close string) {
+	if nonce == "" {
+		return "<" + base + ">", "</" + base + ">"
 	}
-	return BeginTag + "\n" + body + "\n" + EndTag + "\n"
+	return "<" + base + "_" + nonce + ">", "</" + base + "_" + nonce + ">"
+}
+
+func wrapperFn(open, close string) func(string) string {
+	return func(body string) string {
+		if body == "" {
+			return open + "\n" + close + "\n"
+		}
+		return open + "\n" + body + "\n" + close + "\n"
+	}
 }
 
 func capMessages(msgs []Message, maxMsgs int) ([]Message, int) {
@@ -98,30 +140,49 @@ func capMessages(msgs []Message, maxMsgs int) ([]Message, int) {
 	return out, tailStart - 1
 }
 
-// formatter abstracts the text vs jsonl representation. Each implementation
-// chooses how to encode one Message and how to join multiple ones.
+// formatter abstracts text vs jsonl. Each implementation chooses how to
+// encode one Message and how to join multiples.
 type formatter interface {
 	formatOne(m Message) string
 	joiner() string
 	omittedMarker(n int) string
 }
 
-func pickFormatter(f Format) formatter {
+func pickFormatter(f Format, includeTimestamps bool, files FilesMode) formatter {
 	if f == FormatJSONL {
-		return jsonlFormatter{}
+		return jsonlFormatter{includeTimestamps: includeTimestamps, files: files}
 	}
-	return textFormatter{}
+	return textFormatter{includeTimestamps: includeTimestamps, files: files}
 }
 
-type textFormatter struct{}
+type textFormatter struct {
+	includeTimestamps bool
+	files             FilesMode
+}
 
-func (textFormatter) formatOne(m Message) string {
-	speaker := speakerTag(m)
+func (t textFormatter) formatOne(m Message) string {
+	speaker := speakerTag(m, t.includeTimestamps)
 	edited := ""
 	if m.Edited {
 		edited = " (edited)"
 	}
-	return fmt.Sprintf("%s%s: %s", speaker, edited, m.Text)
+	body := m.Text
+	if t.files == FilesLink && len(m.Files) > 0 {
+		var sb strings.Builder
+		sb.WriteString(body)
+		for _, f := range m.Files {
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString("[file: ")
+			sb.WriteString(f.Name)
+			sb.WriteString(" url=")
+			sb.WriteString(f.URL)
+			sb.WriteByte(']')
+		}
+		body = sb.String()
+	}
+	return fmt.Sprintf("%s%s: %s", speaker, edited, body)
 }
 
 func (textFormatter) joiner() string { return "\n\n" }
@@ -130,12 +191,20 @@ func (textFormatter) omittedMarker(n int) string {
 	return fmt.Sprintf("... (%d messages omitted) ...", n)
 }
 
-type jsonlFormatter struct{}
+type jsonlFormatter struct {
+	includeTimestamps bool
+	files             FilesMode
+}
 
-func (jsonlFormatter) formatOne(m Message) string {
+func (j jsonlFormatter) formatOne(m Message) string {
 	obj := map[string]any{
 		"ts":   m.TS,
 		"text": m.Text,
+	}
+	if j.includeTimestamps {
+		if t := parseSlackTS(m.TS); !t.IsZero() {
+			obj["time"] = t.Local().Format(time.RFC3339)
+		}
 	}
 	switch m.Source {
 	case SourceUser:
@@ -148,6 +217,13 @@ func (jsonlFormatter) formatOne(m Message) string {
 	if m.Edited {
 		obj["edited"] = true
 	}
+	if j.files == FilesLink && len(m.Files) > 0 {
+		files := make([]map[string]string, 0, len(m.Files))
+		for _, f := range m.Files {
+			files = append(files, map[string]string{"name": f.Name, "url": f.URL})
+		}
+		obj["files"] = files
+	}
 	b, _ := json.Marshal(obj)
 	return string(b)
 }
@@ -159,26 +235,44 @@ func (jsonlFormatter) omittedMarker(n int) string {
 	return string(b)
 }
 
-func speakerTag(m Message) string {
+func speakerTag(m Message, includeTimestamp bool) string {
+	timePart := ""
+	if includeTimestamp {
+		if t := parseSlackTS(m.TS); !t.IsZero() {
+			timePart = " time=" + t.Local().Format("2006-01-02 15:04:05 -0700")
+		}
+	}
 	switch m.Source {
 	case SourceUser:
-		return fmt.Sprintf("<@%s user ts=%s>", m.User, m.TS)
+		return fmt.Sprintf("<@%s user ts=%s%s>", m.User, m.TS, timePart)
 	case SourceBot:
 		name := m.Bot
 		if name == "" {
 			name = "unknown"
 		}
-		return fmt.Sprintf("<bot %s ts=%s>", name, m.TS)
+		return fmt.Sprintf("<bot %s ts=%s%s>", name, m.TS, timePart)
 	case SourceSelf:
-		return fmt.Sprintf("[self bot ts=%s]", m.TS)
+		return fmt.Sprintf("[self bot ts=%s%s]", m.TS, timePart)
 	default:
-		return fmt.Sprintf("<? ts=%s>", m.TS)
+		return fmt.Sprintf("<? ts=%s%s>", m.TS, timePart)
 	}
 }
 
-// renderBody assembles the message-list body. omittedCount tracks how many
-// messages were dropped at the head (from the N-message cap, before any byte
-// truncation).
+// parseSlackTS converts "1234567890.123456" to time.Time. Returns the zero
+// value on parse failure (caller treats that as "skip the formatted time").
+func parseSlackTS(ts string) time.Time {
+	dot := strings.IndexByte(ts, '.')
+	secStr := ts
+	if dot >= 0 {
+		secStr = ts[:dot]
+	}
+	sec, err := strconv.ParseInt(secStr, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
+
 func renderBody(msgs []Message, omittedHead int, fmtr formatter) string {
 	parts := make([]string, 0, len(msgs)+1)
 	if len(msgs) > 0 {
@@ -193,21 +287,16 @@ func renderBody(msgs []Message, omittedHead int, fmtr formatter) string {
 	return strings.Join(parts, fmtr.joiner())
 }
 
-// shrinkToFit handles the case where the rendered body exceeds maxBytes. The
-// strategy: keep parent, walk tail messages from the end accepting whichever
+// shrinkToFit handles the case where the rendered body exceeds maxBytes.
+// Strategy: keep parent, walk tail messages from the end accepting whichever
 // fit. If even parent alone is too big, truncate parent at a line boundary
 // (rune boundary as last resort) and tag the result with [truncated].
-//
-// omittedHead represents messages already dropped by capMessages (the N
-// cap); we render that gap with one omitted marker. A second marker reports
-// any further messages dropped here between parent and the kept tail.
-func shrinkToFit(msgs []Message, omittedHead int, fmtr formatter, maxBytes int) string {
+func shrinkToFit(msgs []Message, omittedHead int, fmtr formatter, wrap func(string) string, maxBytes int) string {
 	parent := msgs[0]
 	parentStr := fmtr.formatOne(parent)
 	envelopeOverhead := len(wrap(""))
 	joiner := fmtr.joiner()
 
-	// Parent alone (with envelope) doesn't fit → truncate parent body.
 	if envelopeOverhead+len(parentStr) > maxBytes {
 		const truncMarker = "\n... [truncated]"
 		budget := maxBytes - envelopeOverhead - len(truncMarker)
@@ -217,9 +306,6 @@ func shrinkToFit(msgs []Message, omittedHead int, fmtr formatter, maxBytes int) 
 		return wrap(truncateText(parentStr, budget) + truncMarker)
 	}
 
-	// renderWith builds the candidate body for the given tail size, choosing
-	// whether to emit a "gap" omitted marker between parent and tail. We try
-	// the largest tail and shrink until it fits.
 	renderWith := func(tailCount int) string {
 		parts := []string{parentStr}
 		if omittedHead > 0 {
@@ -243,8 +329,6 @@ func shrinkToFit(msgs []Message, omittedHead int, fmtr formatter, maxBytes int) 
 			return wrap(body)
 		}
 	}
-	// Unreachable in practice: parent alone fit (checked above), so k=0
-	// should always succeed. Defensive return.
 	return wrap(parentStr)
 }
 
@@ -259,12 +343,10 @@ func truncateText(s string, maxBytes int) string {
 		return ""
 	}
 	cut := maxBytes
-	// Try line boundary in the last quarter of the window.
 	minLine := maxBytes - maxBytes/4
 	if i := strings.LastIndexByte(s[:maxBytes], '\n'); i >= minLine {
 		return s[:i]
 	}
-	// Fall back to rune boundary.
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}

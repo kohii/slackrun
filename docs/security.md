@@ -8,7 +8,7 @@ below are the design.
 | Boundary | Enforced by |
 |---|---|
 | `cwd` is never derived from Slack input | rules.yaml is the only source; absolute paths required, existence checked at boot. |
-| `command` argv is never derived from Slack input | The argv lives entirely in rules.yaml. `{{var}}` tokens are rejected in argv elements; variable content can only enter the child via `action.stdin.parts`. |
+| `command` argv is never derived from Slack input | The argv lives entirely in rules.yaml. `{{var}}` tokens are rejected in argv elements; variable content can only enter the child via `action.stdin`. |
 | Only known senders trigger `type: message` rules | The schema makes `trigger.from` mandatory for `type: message`, with at least one of `bot_user_ids` / `app_ids` / `usernames`. |
 | Only allowed users can `@bot` | `ALLOWED_USER_IDS` env var; everything else is logged `unauthorized` and dropped. |
 | Self-loop prevention | `auth.test` resolves the bot's own user_id / bot_id; events matching either are skipped. |
@@ -16,10 +16,12 @@ below are the design.
 
 ## Template expansion is text, not code
 
-`{{...}}` is allowed only inside `action.stdin.parts[].template`. slackrun
-writes the expanded string to the child's stdin pipe — never to argv, never
-through a shell. There is no shell interpretation, no `ps aux` exposure for
-the expanded body, no shell-quoting hazard.
+`{{event.*}}` metadata variables are allowed only inside `text:` parts of
+`action.stdin`, and Slack-derived message bodies enter stdin only through
+`trigger_message:` / `thread:` parts (which always XML-wrap their content).
+slackrun writes the resulting bytes to the child's stdin pipe — never to
+argv, never through a shell. There is no shell interpretation, no `ps aux`
+exposure for the expanded body, no shell-quoting hazard.
 
 A malicious mention saying
 
@@ -27,23 +29,33 @@ A malicious mention saying
 @bot run ; rm -rf ~
 ```
 
-becomes a stdin payload like `run ; rm -rf ~` and the child reads it as
-data, not commands. If a rule explicitly opts into a shell via
-`["bash", "-c", "..."]`, the shell script itself lives in rules.yaml (still
-no Slack input) — the only way Slack content reaches that script is via
-stdin or `SLACKRUN_*` env vars, both of which are safe under
-`"$VAR"`-quoted shell reads.
+becomes a stdin payload like `run ; rm -rf ~` (inside
+`<UNTRUSTED_SLACK_MESSAGE_…>` tags) and the child reads it as data, not
+commands. If a rule explicitly opts into a shell via `["bash", "-c",
+"..."]`, the shell script itself lives in rules.yaml (still no Slack input)
+— the only way Slack content reaches that script is via stdin or
+`SLACKRUN_*` env vars, both of which are safe under `"$VAR"`-quoted shell
+reads.
 
-## Slack thread context is untrusted
+## Slack message / thread context is untrusted
 
-When a rule's `action.stdin.parts` includes `slack_thread:`, slackrun fetches
-`conversations.replies` for the triggering thread and renders it wrapped in:
+When a rule's `action.stdin` includes `trigger_message:` or `thread:`,
+slackrun renders the triggering message and / or the result of
+`conversations.replies` wrapped in:
 
 ```
-<UNTRUSTED_SLACK_THREAD>
+<UNTRUSTED_SLACK_MESSAGE_ab12cd34>
 ...
-</UNTRUSTED_SLACK_THREAD>
+</UNTRUSTED_SLACK_MESSAGE_ab12cd34>
+
+<UNTRUSTED_SLACK_THREAD_ab12cd34>
+...
+</UNTRUSTED_SLACK_THREAD_ab12cd34>
 ```
+
+The trailing `_ab12cd34` is a per-spawn random suffix on the tag name, so a
+Slack body that writes a literal `</UNTRUSTED_SLACK_THREAD>` cannot escape
+the wrapper.
 
 Authorization (`ALLOWED_USER_IDS`) gates only the **trigger** event, not the
 thread's history. Other users' (and bots') prior messages in the same thread

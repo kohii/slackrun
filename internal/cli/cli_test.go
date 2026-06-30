@@ -19,8 +19,7 @@ rules:
       command: ["echo"]
       timeout_ms: 60000
       stdin:
-        parts:
-          - template: "{{text}}"
+        - trigger_message: {}
 
   - name: sentry-alert
     trigger:
@@ -33,8 +32,7 @@ rules:
       command: ["echo"]
       timeout_ms: 600000
       stdin:
-        parts:
-          - template: "/alert {{permalink}}"
+        - text: "/alert {{event.permalink}}"
 `
 
 func writeRules(t *testing.T) string {
@@ -105,8 +103,15 @@ func TestRunDryRun_Match(t *testing.T) {
 	if len(cmd) != 1 || cmd[0] != "echo" {
 		t.Fatalf("command=%v", cmd)
 	}
-	if s, _ := got["stdin"].(string); s != "hello world" {
-		t.Fatalf("stdin=%q", s)
+	// New stdin uses trigger_message: { } so the rendered stdin is wrapped
+	// in <UNTRUSTED_SLACK_MESSAGE_…> tags and contains the keyword-stripped
+	// body ("world", since the matched rule is the keyword-less default and
+	// the first non-mention token is "hello").
+	if s, _ := got["stdin"].(string); !strings.Contains(s, "hello world") {
+		t.Fatalf("stdin missing body: %q", s)
+	}
+	if s, _ := got["stdin"].(string); !strings.Contains(s, "UNTRUSTED_SLACK_MESSAGE") {
+		t.Fatalf("stdin missing wrapper: %q", s)
 	}
 }
 

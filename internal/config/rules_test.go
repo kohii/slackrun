@@ -32,8 +32,7 @@ rules:
       command: ["echo", "alert"]
       timeout_ms: 60000
       stdin:
-        parts:
-          - template: "permalink: {{permalink}}"
+        - text: "permalink: {{event.permalink}}"
 
   - name: mention-default
     trigger:
@@ -43,8 +42,7 @@ rules:
       command: ["claude", "-p"]
       timeout_ms: 60000
       stdin:
-        parts:
-          - template: "{{text}}"
+        - trigger_message: {}
 `
 
 func TestParseRulesYAML_Valid(t *testing.T) {
@@ -301,7 +299,7 @@ rules:
     trigger: { type: app_mention, keyword: r }
     action:
       cwd: /tmp
-      command: ["claude", "-p", "{{text}}"]
+      command: ["claude", "-p", "{{event.user_id}}"]
       timeout_ms: 1000
 `
 	res := parseAndValidate(t, src)
@@ -310,7 +308,7 @@ rules:
 	}
 }
 
-func TestValidate_StdinPartsAllVariants(t *testing.T) {
+func TestValidate_StdinAllPartKinds(t *testing.T) {
 	t.Parallel()
 	src := `
 rules:
@@ -321,31 +319,44 @@ rules:
       command: [claude, -p]
       timeout_ms: 1000
       stdin:
-        parts:
-          - text: "you are an assistant"
-          - slack_thread:
-              max_messages: 50
-              max_bytes: 65536
-              format: text
-              on_fetch_error: fail
-          - template: "user: {{user}}"
+        - text: "you are an assistant"
+        - trigger_message:
+            heading: 最新の依頼
+            content: command_text
+        - thread:
+            heading: 参考スレッド
+            include_triggering_message: false
+            max_messages: 50
+            on_fetch_error: omit
 `
 	res := parseAndValidate(t, src)
 	if res.HasErrors() {
 		t.Fatalf("unexpected errors: %+v", res.Issues)
 	}
-	parts := res.Rules[0].Action.Stdin.Parts
+	parts := res.Rules[0].Action.Stdin
 	if len(parts) != 3 {
 		t.Fatalf("got %d parts, want 3", len(parts))
 	}
 	if parts[0].Kind != PartKindText {
 		t.Errorf("parts[0] kind = %v", parts[0].Kind)
 	}
-	if parts[1].Kind != PartKindSlackThread {
+	if parts[1].Kind != PartKindTriggerMessage {
 		t.Errorf("parts[1] kind = %v", parts[1].Kind)
 	}
-	if parts[2].Kind != PartKindTemplate {
+	if parts[1].TriggerMessage.Heading != "最新の依頼" {
+		t.Errorf("heading = %q", parts[1].TriggerMessage.Heading)
+	}
+	if parts[1].TriggerMessage.Content != ContentCommandText {
+		t.Errorf("content = %q", parts[1].TriggerMessage.Content)
+	}
+	if parts[2].Kind != PartKindThread {
 		t.Errorf("parts[2] kind = %v", parts[2].Kind)
+	}
+	if parts[2].Thread.IncludeTriggeringMessage {
+		t.Errorf("expected IncludeTriggeringMessage default false")
+	}
+	if parts[2].Thread.OnFetchError != OnFetchErrorOmit {
+		t.Errorf("on_fetch_error = %q", parts[2].Thread.OnFetchError)
 	}
 }
 
@@ -360,9 +371,8 @@ rules:
       command: [echo]
       timeout_ms: 1000
       stdin:
-        parts:
-          - text: "x"
-            template: "y"
+        - text: "x"
+          trigger_message: {}
 `
 	if _, err := ParseRulesYAML([]byte(src), "<test>"); err == nil {
 		t.Fatal("expected error on multi-variant part")
@@ -380,15 +390,14 @@ rules:
       command: [echo]
       timeout_ms: 1000
       stdin:
-        parts:
-          - {}
+        - {}
 `
 	if _, err := ParseRulesYAML([]byte(src), "<test>"); err == nil {
 		t.Fatal("expected error on empty part")
 	}
 }
 
-func TestValidate_TemplatePartRejectsUnknownVar(t *testing.T) {
+func TestValidate_TextPartRejectsUnknownVar(t *testing.T) {
 	t.Parallel()
 	src := `
 rules:
@@ -399,8 +408,7 @@ rules:
       command: [echo]
       timeout_ms: 1000
       stdin:
-        parts:
-          - template: "hello {{bogus}}"
+        - text: "hello {{bogus}}"
 `
 	res := parseAndValidate(t, src)
 	if !hasIssue(res.Issues, "unknown variable {{bogus}}") {
@@ -408,7 +416,45 @@ rules:
 	}
 }
 
-func TestValidate_SlackThreadEnums(t *testing.T) {
+func TestValidate_TextPartRejectsLegacyBodyVar(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: "hello {{text}}"
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "trigger_message") {
+		t.Fatalf("expected legacy-var hint pointing at trigger_message: %+v", res.Issues)
+	}
+}
+
+func TestValidate_TextPartRejectsLegacyMetaVar(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: "user: {{user}}"
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "{{event.user_id}}") {
+		t.Fatalf("expected legacy hint pointing at event.user_id: %+v", res.Issues)
+	}
+}
+
+func TestValidate_ThreadEnums(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
@@ -416,7 +462,8 @@ func TestValidate_SlackThreadEnums(t *testing.T) {
 		needle string
 	}{
 		{"format", `format: yaml`, `format must be "text" or "jsonl"`},
-		{"on_fetch_error", `on_fetch_error: retry`, `on_fetch_error must be "fail" or "fallback_event"`},
+		{"on_fetch_error", `on_fetch_error: retry`, `on_fetch_error must be "fail" or "omit"`},
+		{"files", `files: bogus`, `files must be "none" or "link"`},
 		{"max_messages", `max_messages: -1`, "max_messages must be >= 0"},
 		{"max_bytes", `max_bytes: -1`, "max_bytes must be >= 0"},
 	}
@@ -433,9 +480,8 @@ rules:
       command: [echo]
       timeout_ms: 1000
       stdin:
-        parts:
-          - slack_thread:
-              ` + c.body + `
+        - thread:
+            ` + c.body + `
 `
 			res := parseAndValidate(t, src)
 			if !hasIssue(res.Issues, c.needle) {
@@ -445,9 +491,21 @@ rules:
 	}
 }
 
-func TestValidate_ExcludeTriggeringMessage_WithFallbackEventWarns(t *testing.T) {
+func TestValidate_TriggerMessageEnums(t *testing.T) {
 	t.Parallel()
-	src := `
+	cases := []struct {
+		name   string
+		body   string
+		needle string
+	}{
+		{"content", `content: bogus`, `content must be "command_text", "body_text", or "raw_text"`},
+		{"files", `files: bogus`, `files must be "none" or "link"`},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			src := `
 rules:
   - name: r
     trigger: { type: app_mention, keyword: r }
@@ -456,27 +514,18 @@ rules:
       command: [echo]
       timeout_ms: 1000
       stdin:
-        parts:
-          - slack_thread:
-              exclude_triggering_message: true
-              on_fetch_error: fallback_event
+        - trigger_message:
+            ` + c.body + `
 `
-	res := parseAndValidate(t, src)
-	if res.HasErrors() {
-		t.Fatalf("expected warn, not error: %+v", res.Issues)
-	}
-	var sawWarn bool
-	for _, i := range res.Issues {
-		if i.Level == IssueWarn && strings.Contains(i.Message, "empty fallback") {
-			sawWarn = true
-		}
-	}
-	if !sawWarn {
-		t.Fatalf("expected empty-fallback warn: %+v", res.Issues)
+			res := parseAndValidate(t, src)
+			if !hasIssue(res.Issues, c.needle) {
+				t.Fatalf("missing %q: %+v", c.needle, res.Issues)
+			}
+		})
 	}
 }
 
-func TestValidate_StdinPartsEmptyArrayRejected(t *testing.T) {
+func TestValidate_RejectsMultipleTriggerMessage(t *testing.T) {
 	t.Parallel()
 	src := `
 rules:
@@ -487,10 +536,69 @@ rules:
       command: [echo]
       timeout_ms: 1000
       stdin:
-        parts: []
+        - trigger_message: {}
+        - trigger_message: {}
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "trigger_message parts; at most one") {
+		t.Fatalf("expected multi-trigger_message rejection: %+v", res.Issues)
+	}
+}
+
+func TestValidate_RejectsMultipleThread(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - thread: {}
+        - thread: {}
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "thread parts; at most one") {
+		t.Fatalf("expected multi-thread rejection: %+v", res.Issues)
+	}
+}
+
+func TestValidate_RejectsTemplateInHeading(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - trigger_message:
+            heading: "from {{event.user_id}}"
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "heading must not contain") {
+		t.Fatalf("expected heading-template rejection: %+v", res.Issues)
+	}
+}
+
+func TestValidate_StdinEmptyArrayRejected(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin: []
 `
 	res := parseAndValidate(t, src)
 	if !hasIssue(res.Issues, "must contain at least one part") {
-		t.Fatalf("expected empty-parts error: %+v", res.Issues)
+		t.Fatalf("expected empty-stdin error: %+v", res.Issues)
 	}
 }

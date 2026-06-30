@@ -16,16 +16,16 @@ import (
 // dryRunInput is the shape we expect from --event. We try to mirror Slack's
 // own JSON keys so users can paste a real payload.
 type dryRunInput struct {
-	Type     string `json:"type"`
-	Subtype  string `json:"subtype"`
-	Channel  string `json:"channel"`
-	User     string `json:"user"`
-	BotID    string `json:"bot_id"`
-	AppID    string `json:"app_id"`
-	Username string `json:"username"`
-	TS       string `json:"ts"`
-	ThreadTS string `json:"thread_ts"`
-	Text     string `json:"text"`
+	Type       string `json:"type"`
+	Subtype    string `json:"subtype"`
+	Channel    string `json:"channel"`
+	User       string `json:"user"`
+	BotID      string `json:"bot_id"`
+	AppID      string `json:"app_id"`
+	Username   string `json:"username"`
+	TS         string `json:"ts"`
+	ThreadTS   string `json:"thread_ts"`
+	Text       string `json:"text"`
 	BotProfile *struct {
 		Name string `json:"name"`
 	} `json:"bot_profile"`
@@ -128,10 +128,10 @@ func RunDryRun(args []string, stdout, stderr io.Writer) int {
 	if res.Kind == dispatch.MatchKindMatched {
 		vars := dispatch.TemplateVars{
 			Permalink: "<<permalink>>",
-			Text:      res.Text,
-			Rest:      res.Rest,
-			Channel:   dispEv.Channel,
-			User:      dispEv.User,
+			ChannelID: dispEv.Channel,
+			UserID:    dispEv.User,
+			TS:        dispEv.TS,
+			ThreadTS:  dispEv.ThreadTS,
 		}
 		report["rule"] = res.Rule.Name
 		report["cwd"] = res.Rule.Action.Cwd
@@ -140,13 +140,13 @@ func RunDryRun(args []string, stdout, stderr io.Writer) int {
 		report["text"] = res.Text
 		report["first_token"] = res.FirstToken
 		report["rest"] = res.Rest
-		// Render stdin parts so operators can see the shape (and template
+		// Render stdin parts so operators can see the shape (and variable
 		// expansion) without actually calling Slack. To make
-		// `exclude_triggering_message` visible we synthesize a single-message
+		// include_triggering_message visible we synthesize a single-message
 		// "thread" from the event payload when the event has a TS.
-		if spec := res.Rule.Action.Stdin; spec != nil {
-			report["stdin"] = renderStdinPreview(spec, vars, dispEv)
-			report["thread_fetch"] = stdinUsesThread(spec)
+		if parts := res.Rule.Action.Stdin; parts != nil {
+			report["stdin"] = renderStdinPreview(parts, vars, dispEv, res)
+			report["thread_fetch"] = stdinUsesThread(parts)
 		}
 	} else if res.Kind == dispatch.MatchKindNoMatch {
 		report["text"] = res.Text
@@ -173,45 +173,70 @@ func matchKindName(k dispatch.MatchKind) string {
 }
 
 // renderStdinPreview composes the parts as runMatched would, but without
-// fetching a real thread. To make exclude_triggering_message observable in
-// preview, we synthesize a single-message "thread" from the event payload
-// when the event has a TS. operators can therefore see the part collapse
-// to empty when exclude_triggering_message removes the only message.
-func renderStdinPreview(s *config.StdinSpec, vars dispatch.TemplateVars, ev dispatch.IncomingEvent) string {
-	if s == nil {
-		return ""
-	}
+// fetching a real thread. A synthesized one-message thread mirrors the
+// triggering event so include_triggering_message:false on a standalone
+// mention collapses the part exactly as it would in production.
+func renderStdinPreview(parts []config.StdinPart, vars dispatch.TemplateVars, ev dispatch.IncomingEvent, res dispatch.MatchResult) string {
 	thread := previewThread(ev)
 	var sb strings.Builder
-	for _, p := range s.Parts {
+	for _, p := range parts {
 		switch p.Kind {
 		case config.PartKindText:
-			sb.WriteString(p.Text)
-		case config.PartKindTemplate:
-			sb.WriteString(dispatch.ExpandTemplate(p.Template, vars))
-		case config.PartKindSlackThread:
+			sb.WriteString(dispatch.ExpandTemplate(p.Text, vars))
+
+		case config.PartKindTriggerMessage:
+			spec := p.TriggerMessage
+			if spec == nil {
+				spec = &config.TriggerMessageSpec{}
+			}
+			msg := previewTriggerMessage(ev, res, spec.Content)
+			body := slackthread.RenderTriggerMessage(msg, slackthread.RenderOptions{
+				Nonce:             "preview",
+				Format:            slackthread.FormatText,
+				IncludeTimestamps: spec.IncludeTimestamps,
+				Files:             slackthread.FilesMode(spec.Files),
+			})
+			writePartWithHeading(&sb, spec.Heading, body)
+
+		case config.PartKindThread:
+			spec := p.Thread
+			if spec == nil {
+				spec = &config.ThreadSpec{}
+			}
 			msgs := thread
-			if p.SlackThread != nil && p.SlackThread.ExcludeTriggeringMessage && ev.TS != "" {
+			if !spec.IncludeTriggeringMessage && ev.TS != "" {
 				msgs = filterOutTS(msgs, ev.TS)
-				if len(msgs) == 0 {
-					continue
-				}
 			}
-			opts := slackthread.FormatOptions{}
-			if p.SlackThread != nil {
-				opts.Format = slackthread.Format(p.SlackThread.Format)
-				opts.MaxMessages = p.SlackThread.MaxMessages
-				opts.MaxBytes = p.SlackThread.MaxBytes
-			}
-			sb.WriteString(slackthread.Render(msgs, opts))
+			body := slackthread.RenderThread(msgs, slackthread.RenderOptions{
+				Nonce:             "preview",
+				Format:            slackthread.Format(spec.Format),
+				MaxMessages:       spec.MaxMessages,
+				MaxBytes:          spec.MaxBytes,
+				IncludeTimestamps: spec.IncludeTimestamps,
+				Files:             slackthread.FilesMode(spec.Files),
+			})
+			writePartWithHeading(&sb, spec.Heading, body)
 		}
 	}
 	return sb.String()
 }
 
+func writePartWithHeading(sb *strings.Builder, heading, body string) {
+	if body == "" {
+		return
+	}
+	if heading != "" {
+		sb.WriteString(heading)
+		if !strings.HasSuffix(heading, "\n") {
+			sb.WriteByte('\n')
+		}
+	}
+	sb.WriteString(body)
+}
+
 // previewThread synthesizes a one-message thread from the event payload so
 // the preview reflects what runMatched would receive when the thread has no
-// replies (or when exclude_triggering_message is applied). Returns nil if
+// replies (or when include_triggering_message is applied). Returns nil if
 // the event lacks a TS.
 func previewThread(ev dispatch.IncomingEvent) []slackthread.Message {
 	if ev.TS == "" {
@@ -223,15 +248,41 @@ func previewThread(ev dispatch.IncomingEvent) []slackthread.Message {
 		m.User = ev.User
 	} else {
 		m.Source = slackthread.SourceBot
-		if ev.Username != "" {
+		switch {
+		case ev.Username != "":
 			m.Bot = ev.Username
-		} else if ev.BotProfileName != "" {
+		case ev.BotProfileName != "":
 			m.Bot = ev.BotProfileName
-		} else {
+		default:
 			m.Bot = ev.BotID
 		}
 	}
 	return []slackthread.Message{m}
+}
+
+func previewTriggerMessage(ev dispatch.IncomingEvent, res dispatch.MatchResult, mode config.ContentMode) slackthread.Message {
+	msg := slackthread.Message{
+		TS:   ev.TS,
+		Text: dispatch.MessageBody(ev, res, mode),
+	}
+	if ev.User != "" {
+		msg.Source = slackthread.SourceUser
+		msg.User = ev.User
+	} else {
+		msg.Source = slackthread.SourceBot
+		switch {
+		case ev.Username != "":
+			msg.Bot = ev.Username
+		case ev.BotProfileName != "":
+			msg.Bot = ev.BotProfileName
+		default:
+			msg.Bot = ev.BotID
+		}
+	}
+	for _, f := range dispatch.ExtractFiles(ev) {
+		msg.Files = append(msg.Files, slackthread.File{Name: f.Name, URL: f.URL})
+	}
+	return msg
 }
 
 func filterOutTS(msgs []slackthread.Message, ts string) []slackthread.Message {
@@ -245,12 +296,9 @@ func filterOutTS(msgs []slackthread.Message, ts string) []slackthread.Message {
 	return out
 }
 
-func stdinUsesThread(s *config.StdinSpec) bool {
-	if s == nil {
-		return false
-	}
-	for _, p := range s.Parts {
-		if p.Kind == config.PartKindSlackThread {
+func stdinUsesThread(parts []config.StdinPart) bool {
+	for _, p := range parts {
+		if p.Kind == config.PartKindThread {
 			return true
 		}
 	}

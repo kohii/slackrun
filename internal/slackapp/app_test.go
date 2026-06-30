@@ -14,53 +14,53 @@ import (
 func TestNeedsThreadFetch(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		spec *config.StdinSpec
-		want bool
+		name  string
+		parts []config.StdinPart
+		want  bool
 	}{
 		{"nil", nil, false},
-		{"text only", &config.StdinSpec{Parts: []config.StdinPart{{Kind: config.PartKindText, Text: "x"}}}, false},
-		{"with slack_thread", &config.StdinSpec{Parts: []config.StdinPart{
+		{"text only", []config.StdinPart{{Kind: config.PartKindText, Text: "x"}}, false},
+		{"trigger_message only", []config.StdinPart{{Kind: config.PartKindTriggerMessage, TriggerMessage: &config.TriggerMessageSpec{}}}, false},
+		{"with thread", []config.StdinPart{
 			{Kind: config.PartKindText, Text: "x"},
-			{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{}},
-		}}, true},
+			{Kind: config.PartKindThread, Thread: &config.ThreadSpec{}},
+		}, true},
 	}
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := needsThreadFetch(c.spec); got != c.want {
+			if got := needsThreadFetch(c.parts); got != c.want {
 				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})
 	}
 }
 
-func TestStrictestFetchErrorPolicy(t *testing.T) {
+func TestThreadFetchPolicy(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name string
-		spec *config.StdinSpec
-		want string
+		name  string
+		parts []config.StdinPart
+		want  config.OnFetchErrorPolicy
 	}{
-		{"nil → fail", nil, "fail"},
-		{"no slack_thread → fail (vacuous)", &config.StdinSpec{Parts: []config.StdinPart{{Kind: config.PartKindText, Text: "x"}}}, "fail"},
-		{"explicit fail wins", &config.StdinSpec{Parts: []config.StdinPart{
-			{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{OnFetchError: "fallback_event"}},
-			{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{OnFetchError: "fail"}},
-		}}, "fail"},
-		{"all fallback → fallback", &config.StdinSpec{Parts: []config.StdinPart{
-			{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{OnFetchError: "fallback_event"}},
-		}}, "fallback_event"},
-		{"empty defaults to fail", &config.StdinSpec{Parts: []config.StdinPart{
-			{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{}},
-		}}, "fail"},
+		{"no thread → fail (vacuous default)", nil, config.OnFetchErrorFail},
+		{"text only → fail", []config.StdinPart{{Kind: config.PartKindText, Text: "x"}}, config.OnFetchErrorFail},
+		{"explicit fail", []config.StdinPart{
+			{Kind: config.PartKindThread, Thread: &config.ThreadSpec{OnFetchError: config.OnFetchErrorFail}},
+		}, config.OnFetchErrorFail},
+		{"explicit omit", []config.StdinPart{
+			{Kind: config.PartKindThread, Thread: &config.ThreadSpec{OnFetchError: config.OnFetchErrorOmit}},
+		}, config.OnFetchErrorOmit},
+		{"default thread → fail", []config.StdinPart{
+			{Kind: config.PartKindThread, Thread: &config.ThreadSpec{}},
+		}, config.OnFetchErrorFail},
 	}
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := strictestFetchErrorPolicy(c.spec); got != c.want {
+			if got := threadFetchPolicy(c.parts); got != c.want {
 				t.Errorf("got %q, want %q", got, c.want)
 			}
 		})
@@ -69,13 +69,13 @@ func TestStrictestFetchErrorPolicy(t *testing.T) {
 
 func TestBuildStdinPayload_ConcatsPartsInOrder(t *testing.T) {
 	t.Parallel()
-	spec := &config.StdinSpec{Parts: []config.StdinPart{
+	parts := []config.StdinPart{
 		{Kind: config.PartKindText, Text: "INTRO\n"},
-		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{Format: "text"}},
+		{Kind: config.PartKindThread, Thread: &config.ThreadSpec{IncludeTriggeringMessage: true, Format: "text"}},
 		{Kind: config.PartKindText, Text: "\nOUTRO"},
-	}}
+	}
 	thread := []slackthread.Message{{TS: "1", Source: slackthread.SourceUser, User: "U1", Text: "hi"}}
-	out := buildStdinPayload(spec, dispatch.TemplateVars{}, thread, "")
+	out := buildStdinPayload(stdinBuildInput{Parts: parts, Thread: thread})
 	if !strings.HasPrefix(out, "INTRO\n") {
 		t.Errorf("missing INTRO prefix: %q", out)
 	}
@@ -87,118 +87,128 @@ func TestBuildStdinPayload_ConcatsPartsInOrder(t *testing.T) {
 	}
 }
 
-func TestBuildStdinPayload_ExpandsTemplateVars(t *testing.T) {
+func TestBuildStdinPayload_ExpandsMetadataVars(t *testing.T) {
 	t.Parallel()
-	spec := &config.StdinSpec{Parts: []config.StdinPart{
-		{Kind: config.PartKindTemplate, Template: "user={{user}} text={{text}}"},
-	}}
-	out := buildStdinPayload(spec, dispatch.TemplateVars{User: "U1", Text: "hello"}, nil, "")
-	if out != "user=U1 text=hello" {
+	parts := []config.StdinPart{
+		{Kind: config.PartKindText, Text: "user={{event.user_id}} channel={{event.channel_id}}"},
+	}
+	out := buildStdinPayload(stdinBuildInput{
+		Parts: parts,
+		Vars:  dispatch.TemplateVars{UserID: "U1", ChannelID: "C9"},
+	})
+	if out != "user=U1 channel=C9" {
 		t.Fatalf("got %q", out)
 	}
 }
 
-func TestBuildStdinPayload_ExcludeTriggeringMessage_StandaloneMention_OmitsWrapper(t *testing.T) {
+func TestBuildStdinPayload_ThreadStandaloneMention_PartVanishes(t *testing.T) {
 	t.Parallel()
-	// Slack `conversations.replies` on a thread that does not exist yet
-	// returns just the triggering message. With ExcludeTriggeringMessage,
-	// the slack_thread part has nothing left to render — the part should
-	// contribute the empty string (no wrapper) so the stdin stays clean.
-	spec := &config.StdinSpec{Parts: []config.StdinPart{
-		{Kind: config.PartKindTemplate, Template: "{{text}}\n\n"},
-		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{ExcludeTriggeringMessage: true}},
-	}}
+	// A standalone mention's "thread" is just the trigger itself; with
+	// IncludeTriggeringMessage:false the thread part has nothing to render
+	// and must contribute nothing — including its heading.
+	parts := []config.StdinPart{
+		{Kind: config.PartKindText, Text: "PRE\n"},
+		{Kind: config.PartKindThread, Thread: &config.ThreadSpec{
+			Heading:                  "参考スレッド",
+			IncludeTriggeringMessage: false,
+		}},
+	}
 	thread := []slackthread.Message{{TS: "1.0", Source: slackthread.SourceUser, User: "U1", Text: "hi"}}
-	out := buildStdinPayload(spec, dispatch.TemplateVars{Text: "hi"}, thread, "1.0")
-	if out != "hi\n\n" {
-		t.Fatalf("expected only the template part, got %q", out)
+	out := buildStdinPayload(stdinBuildInput{
+		Parts:  parts,
+		Event:  dispatch.IncomingEvent{TS: "1.0"},
+		Thread: thread,
+	})
+	if out != "PRE\n" {
+		t.Fatalf("expected only the PRE text, got %q", out)
 	}
 	if strings.Contains(out, "UNTRUSTED_SLACK_THREAD") {
 		t.Fatalf("wrapper leaked into empty-thread output: %q", out)
 	}
+	if strings.Contains(out, "参考スレッド") {
+		t.Fatalf("heading leaked alongside empty thread: %q", out)
+	}
 }
 
-func TestBuildStdinPayload_ExcludeTriggeringMessage_InThread_DropsTriggerOnly(t *testing.T) {
+func TestBuildStdinPayload_ThreadInThread_DropsTriggerByDefault(t *testing.T) {
 	t.Parallel()
-	spec := &config.StdinSpec{Parts: []config.StdinPart{
-		{Kind: config.PartKindTemplate, Template: "{{text}}\n\n"},
-		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{ExcludeTriggeringMessage: true}},
-	}}
+	parts := []config.StdinPart{
+		{Kind: config.PartKindTriggerMessage, TriggerMessage: &config.TriggerMessageSpec{}},
+		{Kind: config.PartKindThread, Thread: &config.ThreadSpec{IncludeTriggeringMessage: false}},
+	}
 	thread := []slackthread.Message{
 		{TS: "1000", Source: slackthread.SourceUser, User: "U1", Text: "parent"},
 		{TS: "1001", Source: slackthread.SourceUser, User: "U2", Text: "reply"},
-		{TS: "1003", Source: slackthread.SourceUser, User: "U1", Text: "trigger"}, // ← excluded
+		{TS: "1003", Source: slackthread.SourceUser, User: "U1", Text: "trigger"}, // excluded
 	}
-	out := buildStdinPayload(spec, dispatch.TemplateVars{Text: "trigger"}, thread, "1003")
-	if !strings.HasPrefix(out, "trigger\n\n<UNTRUSTED_SLACK_THREAD>") {
-		t.Errorf("template prefix or wrapper missing: %q", out)
+	ev := dispatch.IncomingEvent{Type: "app_mention", TS: "1003", User: "U1", Text: "trigger"}
+	res := dispatch.MatchResult{Text: "trigger", Rest: "trigger"}
+	out := buildStdinPayload(stdinBuildInput{Parts: parts, Event: ev, Match: res, Thread: thread, Nonce: "TEST"})
+	if !strings.Contains(out, "UNTRUSTED_SLACK_MESSAGE_TEST") {
+		t.Errorf("trigger_message wrapper missing: %q", out)
 	}
-	if !strings.Contains(out, "ts=1000>: parent") {
-		t.Errorf("parent dropped: %q", out)
+	if !strings.Contains(out, "UNTRUSTED_SLACK_THREAD_TEST") {
+		t.Errorf("thread wrapper missing: %q", out)
 	}
-	if !strings.Contains(out, "ts=1001>: reply") {
-		t.Errorf("reply dropped: %q", out)
+	if !strings.Contains(out, "ts=1000>: parent") || !strings.Contains(out, "ts=1001>: reply") {
+		t.Errorf("prior messages missing: %q", out)
 	}
-	// The triggering message must not appear inside the thread block — the
-	// template part already shows it, and the whole point of the flag is to
-	// avoid the duplication.
-	if strings.Contains(out, "ts=1003>") {
+	// "trigger" body must appear once in trigger_message; it must NOT also
+	// appear inside the thread block.
+	idxFirst := strings.Index(out, "trigger")
+	if idxFirst < 0 {
+		t.Fatalf("trigger body missing: %q", out)
+	}
+	// Check that the trigger body does not appear inside the thread block
+	// (which starts after the first occurrence of UNTRUSTED_SLACK_THREAD_TEST).
+	threadStart := strings.Index(out, "UNTRUSTED_SLACK_THREAD_TEST")
+	if threadStart >= 0 && strings.Contains(out[threadStart:], "ts=1003>") {
 		t.Errorf("trigger leaked into thread block: %q", out)
 	}
 }
 
-func TestBuildStdinPayload_ExcludeTriggeringMessage_TriggerTSAbsent_PreservesAll(t *testing.T) {
+func TestBuildStdinPayload_TriggerMessage_AlwaysRenders(t *testing.T) {
 	t.Parallel()
-	// Dry-run path passes triggerTS="" to disable filtering. Verify nothing
-	// is removed in that case.
-	spec := &config.StdinSpec{Parts: []config.StdinPart{
-		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{ExcludeTriggeringMessage: true}},
-	}}
-	thread := []slackthread.Message{{TS: "1.0", Source: slackthread.SourceUser, User: "U1", Text: "kept"}}
-	out := buildStdinPayload(spec, dispatch.TemplateVars{}, thread, "")
-	if !strings.Contains(out, "kept") {
-		t.Fatalf("filtering applied with empty triggerTS: %q", out)
+	parts := []config.StdinPart{
+		{Kind: config.PartKindTriggerMessage, TriggerMessage: &config.TriggerMessageSpec{
+			Heading: "最新の依頼",
+			Content: config.ContentCommandText,
+		}},
+	}
+	ev := dispatch.IncomingEvent{Type: "app_mention", TS: "1.0", User: "U1", Text: "<@UBOT> hello there"}
+	res := dispatch.MatchResult{Text: "hello there", Rest: "there"} // mention stripped; "hello" is first token
+	out := buildStdinPayload(stdinBuildInput{Parts: parts, Event: ev, Match: res, Nonce: "ZZZ"})
+	if !strings.Contains(out, "最新の依頼") {
+		t.Errorf("heading missing: %q", out)
+	}
+	if !strings.Contains(out, "UNTRUSTED_SLACK_MESSAGE_ZZZ") {
+		t.Errorf("wrapper with nonce missing: %q", out)
 	}
 }
 
-func TestBuildStdinPayload_ExcludeTriggeringMessage_NoMatch_PreservesAll(t *testing.T) {
+func TestBuildStdinPayload_TriggerMessage_DefaultModeForDefaultRule(t *testing.T) {
 	t.Parallel()
-	// `message_changed`-like flows where the triggering TS is not present in
-	// the fetched messages. Filtering is a no-op, no error/warn here.
-	spec := &config.StdinSpec{Parts: []config.StdinPart{
-		{Kind: config.PartKindSlackThread, SlackThread: &config.SlackThreadSpec{ExcludeTriggeringMessage: true}},
-	}}
-	thread := []slackthread.Message{{TS: "1.0", Source: slackthread.SourceUser, User: "U1", Text: "kept"}}
-	out := buildStdinPayload(spec, dispatch.TemplateVars{}, thread, "9999.9")
-	if !strings.Contains(out, "kept") {
-		t.Fatalf("expected message preserved when trigger TS does not match: %q", out)
+	// Default rule (no keyword) → CommandText falls back to full mention-
+	// stripped text (the first word IS part of the command).
+	parts := []config.StdinPart{
+		{Kind: config.PartKindTriggerMessage, TriggerMessage: &config.TriggerMessageSpec{}},
+	}
+	ev := dispatch.IncomingEvent{Type: "app_mention", TS: "1.0", User: "U1"}
+	rule := &config.Rule{Trigger: config.Trigger{Type: config.TriggerTypeAppMention}} // Keyword: nil → default rule
+	res := dispatch.MatchResult{Rule: rule, Text: "hello there", Rest: "there"}
+	out := buildStdinPayload(stdinBuildInput{Parts: parts, Event: ev, Match: res})
+	if !strings.Contains(out, "hello there") {
+		t.Errorf("expected full mention-stripped text for default rule, got: %q", out)
+	}
+	if strings.Contains(out, "<@") && !strings.Contains(out, "<@U1 ") {
+		t.Errorf("speaker tag missing: %q", out)
 	}
 }
 
-func TestSynthesizeFallbackThread_UserEvent(t *testing.T) {
-	t.Parallel()
-	ev := dispatch.IncomingEvent{TS: "1.0", User: "U1", Text: "hi"}
-	got := synthesizeFallbackThread(ev, "U_SELF", "")
-	if len(got) != 1 {
-		t.Fatalf("want 1 msg, got %d", len(got))
-	}
-	if got[0].Source != slackthread.SourceUser || got[0].User != "U1" {
-		t.Errorf("source/user wrong: %+v", got[0])
-	}
-}
-
-func TestSynthesizeFallbackThread_TagsSelfMessages(t *testing.T) {
-	t.Parallel()
-	ev := dispatch.IncomingEvent{TS: "1.0", User: "U_SELF", Text: "self"}
-	got := synthesizeFallbackThread(ev, "U_SELF", "")
-	if got[0].Source != slackthread.SourceSelf {
-		t.Errorf("expected self, got %v", got[0].Source)
-	}
-}
-
-func TestSynthesizeFallbackThread_BotPicksReadableName(t *testing.T) {
+func TestBuildTriggerMessage_BotSentryStyle(t *testing.T) {
 	t.Parallel()
 	ev := dispatch.IncomingEvent{
+		Type:  "message",
 		TS:    "1.0",
 		BotID: "B999",
 		Nested: &dispatch.NestedMessage{
@@ -208,15 +218,26 @@ func TestSynthesizeFallbackThread_BotPicksReadableName(t *testing.T) {
 			AppID:          "A123",
 		},
 	}
-	got := synthesizeFallbackThread(ev, "", "")
-	if got[0].Source != slackthread.SourceBot {
-		t.Fatalf("got source %v", got[0].Source)
+	res := dispatch.MatchResult{Text: "alert!"}
+	msg := buildTriggerMessage(ev, res, config.ContentRawText, "", "")
+	if msg.Source != slackthread.SourceBot {
+		t.Errorf("source = %v, want SourceBot", msg.Source)
 	}
-	if got[0].Bot != "Sentry" {
-		t.Errorf("expected Sentry, got %q", got[0].Bot)
+	if msg.Bot != "Sentry" {
+		t.Errorf("bot name = %q, want Sentry", msg.Bot)
 	}
-	if got[0].Text != "alert!" {
-		t.Errorf("text from nested not used: %q", got[0].Text)
+	if msg.Text != "alert!" {
+		t.Errorf("text = %q", msg.Text)
+	}
+}
+
+func TestBuildTriggerMessage_TagsSelfMessages(t *testing.T) {
+	t.Parallel()
+	ev := dispatch.IncomingEvent{TS: "1.0", User: "U_SELF", Text: "self"}
+	res := dispatch.MatchResult{Text: "self"}
+	msg := buildTriggerMessage(ev, res, config.ContentRawText, "U_SELF", "")
+	if msg.Source != slackthread.SourceSelf {
+		t.Errorf("source = %v, want SourceSelf", msg.Source)
 	}
 }
 
@@ -248,5 +269,36 @@ func TestFromMessage_PopulatesAppIDFromBotProfile(t *testing.T) {
 	}
 	if got.Nested.BotProfileName != "Sentry" {
 		t.Errorf("Nested.BotProfileName = %q", got.Nested.BotProfileName)
+	}
+}
+
+func TestFromAppMention_CarriesAttachments(t *testing.T) {
+	t.Parallel()
+	e := &slackevents.AppMentionEvent{
+		Channel:   "C01",
+		User:      "U1",
+		TimeStamp: "1.0",
+		Text:      "<@UBOT> hi",
+		Attachments: []slack.Attachment{{
+			Title: "ctx",
+			Text:  "body",
+		}},
+	}
+	got := fromAppMention(e)
+	if len(got.Attachments) != 1 || got.Attachments[0].Title != "ctx" {
+		t.Errorf("attachment conversion failed: %+v", got.Attachments)
+	}
+}
+
+func TestGenerateNonce_HexAndLength(t *testing.T) {
+	t.Parallel()
+	n := generateNonce()
+	if len(n) != 8 {
+		t.Fatalf("expected 8 hex chars, got %d (%q)", len(n), n)
+	}
+	for _, c := range n {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("non-hex char %q in nonce %q", c, n)
+		}
 	}
 }

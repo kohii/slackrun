@@ -15,18 +15,74 @@ func selfMsg(ts, text string) Message {
 	return Message{TS: ts, Source: SourceSelf, Text: text}
 }
 
-func TestRender_WrapsWithUntrustedTags(t *testing.T) {
+func threadTags(nonce string) (string, string) {
+	open, close := tagPair(ThreadTagBase, nonce)
+	return open, close
+}
+
+func messageTags(nonce string) (string, string) {
+	open, close := tagPair(MessageTagBase, nonce)
+	return open, close
+}
+
+func TestRenderThread_WrapsWithUntrustedTags(t *testing.T) {
 	t.Parallel()
-	out := Render([]Message{userMsg("1.0", "U1", "hi")}, FormatOptions{})
-	if !strings.HasPrefix(out, BeginTag+"\n") {
+	open, close := threadTags("")
+	out := RenderThread([]Message{userMsg("1.0", "U1", "hi")}, RenderOptions{})
+	if !strings.HasPrefix(out, open+"\n") {
 		t.Fatalf("missing begin tag: %q", out)
 	}
-	if !strings.Contains(out, "\n"+EndTag+"\n") {
+	if !strings.Contains(out, "\n"+close+"\n") {
 		t.Fatalf("missing end tag: %q", out)
 	}
 }
 
-func TestRender_TextFormat_SpeakerTags(t *testing.T) {
+func TestRenderThread_NonceAppearsInBothTags(t *testing.T) {
+	t.Parallel()
+	out := RenderThread([]Message{userMsg("1.0", "U1", "hi")}, RenderOptions{Nonce: "abcd1234"})
+	wantOpen, wantClose := threadTags("abcd1234")
+	if !strings.Contains(out, wantOpen) {
+		t.Fatalf("missing open tag with nonce: %q", out)
+	}
+	if !strings.Contains(out, wantClose) {
+		t.Fatalf("missing close tag with nonce: %q", out)
+	}
+}
+
+func TestRenderThread_EmptyMessagesReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	// An empty thread renders to "" so the caller can elide the heading.
+	if got := RenderThread(nil, RenderOptions{}); got != "" {
+		t.Fatalf("expected empty string, got: %q", got)
+	}
+}
+
+func TestRenderTriggerMessage_AlwaysEmitsWrapper(t *testing.T) {
+	t.Parallel()
+	out := RenderTriggerMessage(userMsg("1.0", "U1", "hi"), RenderOptions{Nonce: "abcd"})
+	open, close := messageTags("abcd")
+	if !strings.Contains(out, open) || !strings.Contains(out, close) {
+		t.Fatalf("missing message-wrapper tags: %q", out)
+	}
+	if !strings.Contains(out, "hi") {
+		t.Fatalf("missing body: %q", out)
+	}
+}
+
+func TestRenderTriggerMessage_EmptyBodyStillWraps(t *testing.T) {
+	t.Parallel()
+	// Even with empty Text, the wrapper signals the trigger exists.
+	out := RenderTriggerMessage(userMsg("1.0", "U1", ""), RenderOptions{})
+	if out == "" {
+		t.Fatal("expected non-empty output for empty trigger body")
+	}
+	open, _ := messageTags("")
+	if !strings.Contains(out, open) {
+		t.Fatalf("missing wrapper: %q", out)
+	}
+}
+
+func TestRenderThread_TextFormat_SpeakerTags(t *testing.T) {
 	t.Parallel()
 	msgs := []Message{
 		userMsg("100.0", "U1", "parent"),
@@ -34,7 +90,7 @@ func TestRender_TextFormat_SpeakerTags(t *testing.T) {
 		selfMsg("100.2", "⏳ Working"),
 		{TS: "100.3", Source: SourceUser, User: "U2", Text: "edited body", Edited: true},
 	}
-	out := Render(msgs, FormatOptions{})
+	out := RenderThread(msgs, RenderOptions{})
 	checks := []string{
 		"<@U1 user ts=100.0>: parent",
 		"<bot Sentry ts=100.1>: alert",
@@ -48,14 +104,18 @@ func TestRender_TextFormat_SpeakerTags(t *testing.T) {
 	}
 }
 
-func TestRender_JSONLFormat(t *testing.T) {
+func TestRenderThread_JSONLFormat_StillWrapped(t *testing.T) {
 	t.Parallel()
 	msgs := []Message{
 		userMsg("1.0", "U1", "hi"),
 		botMsg("1.1", "Sentry", "alert"),
 		selfMsg("1.2", "self"),
 	}
-	out := Render(msgs, FormatOptions{Format: FormatJSONL})
+	out := RenderThread(msgs, RenderOptions{Format: FormatJSONL, Nonce: "ABCD"})
+	open, close := threadTags("ABCD")
+	if !strings.Contains(out, open) || !strings.Contains(out, close) {
+		t.Fatalf("jsonl render must still wrap with the untrusted tags: %q", out)
+	}
 	for _, want := range []string{
 		`"user":"U1"`,
 		`"bot":"Sentry"`,
@@ -67,14 +127,36 @@ func TestRender_JSONLFormat(t *testing.T) {
 	}
 }
 
-func TestRender_CapsMessageCount(t *testing.T) {
+func TestRenderThread_IncludeTimestamps_AddsTimeAttr(t *testing.T) {
+	t.Parallel()
+	out := RenderThread(
+		[]Message{userMsg("1700000000.0", "U1", "x")},
+		RenderOptions{IncludeTimestamps: true},
+	)
+	if !strings.Contains(out, " time=") {
+		t.Fatalf("expected time= attribute in:\n%s", out)
+	}
+}
+
+func TestRenderThread_Files_LinkMode(t *testing.T) {
+	t.Parallel()
+	msg := Message{
+		TS: "1.0", Source: SourceUser, User: "U1", Text: "see attached",
+		Files: []File{{Name: "report.pdf", URL: "https://files.example/p"}},
+	}
+	out := RenderThread([]Message{msg}, RenderOptions{Files: FilesLink})
+	if !strings.Contains(out, "[file: report.pdf url=https://files.example/p]") {
+		t.Fatalf("expected file ref in:\n%s", out)
+	}
+}
+
+func TestRenderThread_CapsMessageCount(t *testing.T) {
 	t.Parallel()
 	msgs := make([]Message, 60)
 	for i := range msgs {
 		msgs[i] = userMsg("t", "U1", "msg")
 	}
-	out := Render(msgs, FormatOptions{MaxMessages: 10})
-	// 1 parent + 9 tail = 10 kept, 50 omitted.
+	out := RenderThread(msgs, RenderOptions{MaxMessages: 10})
 	if c := strings.Count(out, "msg"); c != 10 {
 		t.Errorf("kept %d, want 10", c)
 	}
@@ -83,18 +165,17 @@ func TestRender_CapsMessageCount(t *testing.T) {
 	}
 }
 
-func TestRender_BytesCapKeepsParentAndTail(t *testing.T) {
+func TestRenderThread_BytesCapKeepsParentAndTail(t *testing.T) {
 	t.Parallel()
 	parent := userMsg("1.0", "U1", strings.Repeat("P", 200))
 	msgs := []Message{parent}
 	for i := 0; i < 20; i++ {
 		msgs = append(msgs, userMsg("1.x", "U2", strings.Repeat("X", 200)))
 	}
-	// Last few should be most-recent-first preferred.
 	tail := userMsg("9.9", "U9", "LAST_MESSAGE_MARKER")
 	msgs = append(msgs, tail)
 
-	out := Render(msgs, FormatOptions{MaxBytes: 800})
+	out := RenderThread(msgs, RenderOptions{MaxBytes: 800})
 	if !strings.Contains(out, strings.Repeat("P", 200)) {
 		t.Errorf("parent dropped under byte cap:\n%s", out)
 	}
@@ -109,12 +190,11 @@ func TestRender_BytesCapKeepsParentAndTail(t *testing.T) {
 	}
 }
 
-func TestRender_ParentAloneExceedsCap_TruncatesAtBoundary(t *testing.T) {
+func TestRenderThread_ParentAloneExceedsCap_TruncatesAtBoundary(t *testing.T) {
 	t.Parallel()
-	// Build a parent with newlines so line-boundary truncation has somewhere to land.
 	body := strings.Repeat("A line of text.\n", 200)
 	parent := userMsg("1.0", "U1", body)
-	out := Render([]Message{parent}, FormatOptions{MaxBytes: 300})
+	out := RenderThread([]Message{parent}, RenderOptions{MaxBytes: 300})
 	if len(out) > 300 {
 		t.Errorf("output %d bytes exceeds cap 300", len(out))
 	}
@@ -123,31 +203,13 @@ func TestRender_ParentAloneExceedsCap_TruncatesAtBoundary(t *testing.T) {
 	}
 }
 
-func TestRender_BelowEnvelopeCapReturnsEmptyWrapper(t *testing.T) {
+func TestRenderThread_BelowEnvelopeCapReturnsEmptyWrapper(t *testing.T) {
 	t.Parallel()
-	// MaxBytes smaller than the BEGIN/END tags themselves: there is no
-	// useful body subset, so Render returns the empty wrapper unchanged
-	// rather than emitting a partial output that exceeds the cap.
-	out := Render([]Message{userMsg("1.0", "U1", "long body")}, FormatOptions{MaxBytes: 5})
-	if out != BeginTag+"\n"+EndTag+"\n" {
+	out := RenderThread([]Message{userMsg("1.0", "U1", "long body")}, RenderOptions{MaxBytes: 5})
+	open, close := threadTags("")
+	want := open + "\n" + close + "\n"
+	if out != want {
 		t.Errorf("expected empty wrapper, got:\n%s", out)
-	}
-}
-
-func TestRender_EmptyMessagesProducesWrapperOnly(t *testing.T) {
-	t.Parallel()
-	out := Render(nil, FormatOptions{})
-	if out != BeginTag+"\n"+EndTag+"\n" {
-		t.Errorf("unexpected empty output:\n%s", out)
-	}
-}
-
-func TestRender_DefaultsApply(t *testing.T) {
-	t.Parallel()
-	msgs := []Message{userMsg("1.0", "U1", "hi")}
-	out := Render(msgs, FormatOptions{})
-	if !strings.Contains(out, "hi") {
-		t.Errorf("default render dropped content: %s", out)
 	}
 }
 
@@ -162,13 +224,11 @@ func TestTruncateText_PrefersLineBoundary(t *testing.T) {
 
 func TestTruncateText_RuneBoundaryFallback(t *testing.T) {
 	t.Parallel()
-	// multi-byte runes (Japanese) to verify we don't cut mid-rune.
-	s := strings.Repeat("あ", 100) // 3 bytes per rune
+	s := strings.Repeat("あ", 100)
 	got := truncateText(s, 10)
 	if len(got) > 10 {
 		t.Errorf("got %d bytes, want <= 10", len(got))
 	}
-	// Must remain valid UTF-8.
 	if got != "" && !validUTF8(got) {
 		t.Errorf("invalid UTF-8 in truncation: %q", got)
 	}

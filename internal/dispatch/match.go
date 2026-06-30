@@ -25,6 +25,16 @@ type IncomingEvent struct {
 	// BotProfile lets us read display name when the sender exposes only that.
 	BotProfileName string
 
+	// Attachments / Blocks carry the bot-authored rich content typical of
+	// Sentry, Datadog, and Incoming Webhook posts. The triggering-message
+	// renderer flattens these into the body so a `text:`-empty alert is
+	// still usable.
+	Attachments []Attachment
+	Blocks      []Block
+	// Files lists attached uploads (PDF, images, …). Rendered only when the
+	// part opts in via `files: link`.
+	Files []File
+
 	// Some subtypes (notably message_replied) nest the original message
 	// fields under .message instead of the root. Pull these in too so the
 	// dispatcher can see through that nesting transparently.
@@ -40,6 +50,39 @@ type NestedMessage struct {
 	AppID          string
 	Username       string
 	BotProfileName string
+	Attachments    []Attachment
+	Blocks         []Block
+	Files          []File
+}
+
+// Attachment is a Slack legacy `attachments[]` element collapsed to the
+// fields a renderer might surface. Each renderer chooses which to emit.
+type Attachment struct {
+	Fallback string
+	Title    string
+	Text     string
+	Fields   []AttachmentField
+}
+
+// AttachmentField is one row in a Slack legacy attachment.
+type AttachmentField struct {
+	Title string
+	Value string
+}
+
+// Block is one Block Kit block, collapsed to its visible text. Type carries
+// the original block kind ("section", "header", "rich_text", …) so the
+// renderer can group output if it wants. The flattener fills Text with the
+// block's primary plain-text content.
+type Block struct {
+	Type string
+	Text string
+}
+
+// File is one Slack file upload reference.
+type File struct {
+	Name string
+	URL  string
 }
 
 // MatcherContext is the static configuration the matcher needs to filter
@@ -65,10 +108,10 @@ const (
 type MatchResult struct {
 	Kind       MatchKind
 	Rule       *config.Rule
-	Text       string  // normalized message text (mentions stripped for app_mention)
-	FirstToken string  // first non-mention token; empty if none
-	Rest       string  // text minus the first token (for keyword-based dispatch)
-	Reason     string  // populated for Skip / Unauthorized
+	Text       string // normalized message text (mentions stripped for app_mention)
+	FirstToken string // first non-mention token; empty if none
+	Rest       string // text minus the first token (for keyword-based dispatch)
+	Reason     string // populated for Skip / Unauthorized
 }
 
 var allowedMessageSubtypes = map[string]bool{
@@ -93,6 +136,32 @@ func ExtractText(ev IncomingEvent) string {
 		return ev.Nested.Text
 	}
 	return ev.Text
+}
+
+// extractAttachments / extractBlocks / extractFiles prefer the nested
+// `.message` envelope when it carries the field (subtype: message_replied),
+// falling back to the root.
+func extractAttachments(ev IncomingEvent) []Attachment {
+	if ev.Nested != nil && len(ev.Nested.Attachments) > 0 {
+		return ev.Nested.Attachments
+	}
+	return ev.Attachments
+}
+
+func extractBlocks(ev IncomingEvent) []Block {
+	if ev.Nested != nil && len(ev.Nested.Blocks) > 0 {
+		return ev.Nested.Blocks
+	}
+	return ev.Blocks
+}
+
+// ExtractFiles returns the files attached to the triggering event,
+// preferring the nested `.message` envelope when set.
+func ExtractFiles(ev IncomingEvent) []File {
+	if ev.Nested != nil && len(ev.Nested.Files) > 0 {
+		return ev.Nested.Files
+	}
+	return ev.Files
 }
 
 // NormalizeMentionText strips mention tokens, collapses whitespace, and
@@ -233,6 +302,88 @@ func matchMessage(ev IncomingEvent, userID string, r *config.Rule) bool {
 	// (U-prefix). If the sender publishes only bot_id, use app_ids or
 	// usernames.
 	return false
+}
+
+// MessageBody returns the text body of the triggering message for the
+// requested content mode, with bot-authored Block Kit / legacy attachments
+// flattened in. Used by the trigger_message stdin part renderer.
+//
+// For type: message rules, all three content modes resolve to the same
+// "raw + flatten" view because there is no mention / keyword to strip.
+func MessageBody(ev IncomingEvent, res MatchResult, mode config.ContentMode) string {
+	base := selectModeText(ev, res, mode)
+	flattened := flattenBody(ev)
+	switch {
+	case base == "" && flattened == "":
+		return ""
+	case base == "":
+		return flattened
+	case flattened == "":
+		return base
+	}
+	return base + "\n\n" + flattened
+}
+
+func selectModeText(ev IncomingEvent, res MatchResult, mode config.ContentMode) string {
+	if ev.Type != "app_mention" {
+		return ExtractText(ev)
+	}
+	switch mode {
+	case config.ContentRawText:
+		return ExtractText(ev)
+	case config.ContentBodyText:
+		return res.Text
+	case config.ContentCommandText, "":
+		// For default rules (no keyword) Rule.Trigger.Keyword is nil and
+		// `Rest` would drop the user's first word, which is itself part of
+		// the command body. Use the full mention-stripped Text in that case.
+		if res.Rule != nil && res.Rule.Trigger.Keyword != nil {
+			return res.Rest
+		}
+		return res.Text
+	}
+	return res.Text
+}
+
+// flattenBody folds Block Kit blocks and legacy attachments into a single
+// plain-text string appended to the message body. Empty when there is no
+// rich content. Stable order: blocks first (newer API), then attachments.
+func flattenBody(ev IncomingEvent) string {
+	var parts []string
+	for _, b := range extractBlocks(ev) {
+		if t := strings.TrimSpace(b.Text); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	for _, a := range extractAttachments(ev) {
+		parts = append(parts, flattenAttachment(a)...)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func flattenAttachment(a Attachment) []string {
+	var out []string
+	add := func(s string) {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	add(a.Title)
+	add(a.Text)
+	for _, f := range a.Fields {
+		switch {
+		case f.Title != "" && f.Value != "":
+			add(f.Title + ": " + f.Value)
+		case f.Value != "":
+			add(f.Value)
+		}
+	}
+	// fallback is the legacy "text representation if blocks fail" — only use
+	// it when nothing else surfaced.
+	if len(out) == 0 {
+		add(a.Fallback)
+	}
+	return out
 }
 
 func containsString(xs []string, x string) bool {

@@ -85,12 +85,14 @@ func Fetch(ctx context.Context, api Replier, opts FetchOptions) (FetchResult, er
 // FromSlackMessage normalizes a slack.Message into the internal Message form.
 // Source is resolved by precedence: self → user → bot, with the bot name
 // derived from username, BotProfile.Name, BotProfile.AppID, or BotID in that
-// order.
+// order. File attachments are carried over so a downstream renderer can
+// surface them when configured with FilesLink.
 func FromSlackMessage(m slack.Message, selfUserID, selfBotID string) Message {
 	out := Message{
 		TS:     m.Timestamp,
 		Text:   m.Text,
 		Edited: m.Edited != nil,
+		Files:  extractFiles(m),
 	}
 
 	selfHit := (selfUserID != "" && m.User == selfUserID) ||
@@ -106,6 +108,21 @@ func FromSlackMessage(m slack.Message, selfUserID, selfBotID string) Message {
 	}
 	out.Source = SourceBot
 	out.Bot = botNameFromMsg(m)
+	return out
+}
+
+func extractFiles(m slack.Message) []File {
+	if len(m.Files) == 0 {
+		return nil
+	}
+	out := make([]File, 0, len(m.Files))
+	for _, f := range m.Files {
+		url := f.URLPrivateDownload
+		if url == "" {
+			url = f.URLPrivate
+		}
+		out = append(out, File{Name: f.Name, URL: url})
+	}
 	return out
 }
 

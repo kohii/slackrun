@@ -2,6 +2,8 @@ package slackapp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -25,14 +27,14 @@ const threadFetchTimeout = 5 * time.Second
 
 // App is the long-lived slackrun process. Construct with New, then call Run.
 type App struct {
-	env         config.AppEnv
-	rules       []config.Rule
-	api         *slack.Client
-	sm          *socketmode.Client
-	semaphore   *runner.Semaphore
-	dedupe      *Dedupe
-	selfUserID  string
-	selfBotID   string
+	env        config.AppEnv
+	rules      []config.Rule
+	api        *slack.Client
+	sm         *socketmode.Client
+	semaphore  *runner.Semaphore
+	dedupe     *Dedupe
+	selfUserID string
+	selfBotID  string
 
 	jobs *jobRegistry
 }
@@ -115,12 +117,9 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 
 	runErr := a.sm.RunContext(runCtx)
-	// Stop the dispatcher loop and wait for it to drain.
 	cancel()
 	loopWG.Wait()
 
-	// Best-effort: kill running jobs and finalize their progress. The 7-second
-	// budget is the runner's 5s SIGTERM-grace plus 2s for the Web API write.
 	a.jobs.stopAll("⚠️ Bot stopped", 7*time.Second)
 	return runErr
 }
@@ -150,14 +149,12 @@ func (a *App) handleEvent(ctx context.Context, evt socketmode.Event) {
 	case socketmode.EventTypeInvalidAuth:
 		logging.Error("socketmode invalid auth (check SLACK_APP_TOKEN)")
 	case socketmode.EventTypeHello:
-		// no-op
 	case socketmode.EventTypeEventsAPI:
 		eventsAPI, ok := evt.Data.(slackevents.EventsAPIEvent)
 		if !ok {
 			logging.Warn("unexpected events-api payload", logging.F("data", fmt.Sprintf("%T", evt.Data)))
 			return
 		}
-		// Ack first so Slack doesn't re-deliver while we work.
 		if evt.Request != nil {
 			if err := a.sm.Ack(*evt.Request); err != nil {
 				logging.Warn("socketmode ack failed", logging.F("error", err))
@@ -196,9 +193,6 @@ func (a *App) handleIncoming(ctx context.Context, ev dispatch.IncomingEvent) {
 		return
 	}
 
-	// Dedupe is gated after match so we don't burn keys on events that match
-	// no rule — Slack double-fires app_mention + message and only one of
-	// those typically matches.
 	if ev.Channel != "" && ev.TS != "" {
 		switch a.dedupe.Decide(ev.Channel, ev.TS) {
 		case DedupeDuplicate:
@@ -235,19 +229,9 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 	waitPos, release := a.semaphore.Acquire()
 	defer release()
 
-	if waitPos > 0 {
-		if _, _, err := a.api.PostMessage(ev.Channel,
-			slack.MsgOptionText(fmt.Sprintf("⏸️ Queued (#%d)", waitPos), false),
-			slack.MsgOptionTS(threadTS),
-			slack.MsgOptionDisableMarkdown(),
-		); err != nil {
-			logging.Warn("queued message failed", logging.F("error", err))
-		}
-	}
-
-	// Resolve thread fetch and permalink BEFORE posting our "⏳ Working"
-	// progress message. Otherwise that progress message itself would show up
-	// in the conversations.replies result and pollute the AI's context.
+	// Resolve thread fetch BEFORE posting any of our own messages
+	// (⏸️ Queued, ⏳ Working) — those would otherwise show up in the
+	// conversations.replies result and pollute the spawned child's context.
 	var fetchedThread []slackthread.Message
 	var fetchErr error
 	if needsThreadFetch(rule.Action.Stdin) {
@@ -278,9 +262,7 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		}
 	}
 
-	if fetchErr != nil && strictestFetchErrorPolicy(rule.Action.Stdin) == "fail" {
-		// Honour `on_fetch_error: fail`: post the failure directly so the
-		// user never sees a transient "⏳ Working…" that gets overwritten.
+	if fetchErr != nil && threadFetchPolicy(rule.Action.Stdin) == config.OnFetchErrorFail {
 		if _, _, perr := a.api.PostMessage(ev.Channel,
 			slack.MsgOptionText(failedFetchProgressMessage(), false),
 			slack.MsgOptionTS(threadTS),
@@ -292,10 +274,14 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		return
 	}
 
-	if fetchErr != nil {
-		// `on_fetch_error: fallback_event` — synthesize a single-message
-		// thread from the triggering event so the child still sees context.
-		fetchedThread = synthesizeFallbackThread(ev, a.selfUserID, a.selfBotID)
+	if waitPos > 0 {
+		if _, _, err := a.api.PostMessage(ev.Channel,
+			slack.MsgOptionText(fmt.Sprintf("⏸️ Queued (#%d)", waitPos), false),
+			slack.MsgOptionTS(threadTS),
+			slack.MsgOptionDisableMarkdown(),
+		); err != nil {
+			logging.Warn("queued message failed", logging.F("error", err))
+		}
 	}
 
 	progress, err := StartProgress(ctx, a.api, ev.Channel, threadTS)
@@ -305,9 +291,8 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 	}
 
 	jobID := fmt.Sprintf("%s:%s:%s", ev.Channel, ev.TS, rule.Name)
-	a.jobs.register(jobID, progress, nil) // exec handle is filled in below
+	a.jobs.register(jobID, progress, nil)
 
-	// Permalink is only resolved when the rule's template parts reference it.
 	var permalink string
 	if needsPermalink(rule.Action.Stdin) {
 		permalink = a.resolvePermalink(ctx, ev.Channel, ev.TS)
@@ -315,14 +300,24 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 
 	vars := dispatch.TemplateVars{
 		Permalink: permalink,
-		Text:      res.Text,
-		Rest:      res.Rest,
-		Channel:   ev.Channel,
-		User:      ev.User,
+		ChannelID: ev.Channel,
+		UserID:    ev.User,
+		TS:        ev.TS,
+		ThreadTS:  ev.ThreadTS,
 	}
 
+	nonce := generateNonce()
 	timeout := time.Duration(rule.Action.TimeoutMs) * time.Millisecond
-	stdinPayload := buildStdinPayload(rule.Action.Stdin, vars, fetchedThread, ev.TS)
+	stdinPayload := buildStdinPayload(stdinBuildInput{
+		Parts:      rule.Action.Stdin,
+		Vars:       vars,
+		Event:      ev,
+		Match:      res,
+		Thread:     fetchedThread,
+		Nonce:      nonce,
+		SelfUserID: a.selfUserID,
+		SelfBotID:  a.selfBotID,
+	})
 	logging.Info("job start",
 		logging.F("rule", rule.Name),
 		logging.F("cwd", rule.Action.Cwd),
@@ -332,8 +327,6 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		logging.F("stdinBytes", len(stdinPayload)),
 	)
 
-	// Inject SLACKRUN_* on top of action.env so the child has the message
-	// coordinates it needs to call back into `slackrun post|react|upload`.
 	childEnv := make(map[string]string, len(rule.Action.Env)+4)
 	for k, v := range rule.Action.Env {
 		childEnv[k] = v
@@ -392,9 +385,6 @@ func (a *App) resolvePermalink(ctx context.Context, channel, ts string) string {
 	return link
 }
 
-// failureMessage builds the user-visible "❌ Failed" line. We surface a tiny
-// tail of stderr (PII-redacted) so the user gets a hint without needing the
-// log file.
 func failureMessage(r runner.Result) string {
 	tail := lastN(util.SanitizeForSlack(r.Stderr), 400)
 	msg := fmt.Sprintf("❌ Failed: exit %d", r.ExitCode)
@@ -438,18 +428,23 @@ func ruleSummaries(rules []config.Rule) []map[string]any {
 // fromAppMention adapts slack-go's AppMentionEvent to our dispatcher input.
 func fromAppMention(e *slackevents.AppMentionEvent) dispatch.IncomingEvent {
 	return dispatch.IncomingEvent{
-		Type:     "app_mention",
-		Channel:  e.Channel,
-		User:     e.User,
-		BotID:    e.BotID,
-		TS:       e.TimeStamp,
-		ThreadTS: e.ThreadTimeStamp,
-		Text:     e.Text,
+		Type:        "app_mention",
+		Channel:     e.Channel,
+		User:        e.User,
+		BotID:       e.BotID,
+		TS:          e.TimeStamp,
+		ThreadTS:    e.ThreadTimeStamp,
+		Text:        e.Text,
+		Attachments: convertAttachments(e.Attachments),
+		Blocks:      convertBlocks(e.Blocks),
+		Files:       convertFiles(e.Files),
 	}
 }
 
 // fromMessage adapts slack-go's MessageEvent, flattening the .message nesting
-// applied to message_replied subtype.
+// applied to message_replied subtype. Top-level slackevents.MessageEvent
+// exposes Blocks only; Attachments and Files surface from the nested
+// .message envelope (subtype-wrapped events) via slack.Msg.
 func fromMessage(e *slackevents.MessageEvent) dispatch.IncomingEvent {
 	ev := dispatch.IncomingEvent{
 		Type:     "message",
@@ -461,13 +456,17 @@ func fromMessage(e *slackevents.MessageEvent) dispatch.IncomingEvent {
 		TS:       e.TimeStamp,
 		ThreadTS: e.ThreadTimeStamp,
 		Text:     e.Text,
+		Blocks:   convertBlocks(e.Blocks),
 	}
 	if e.Message != nil {
 		ev.Nested = &dispatch.NestedMessage{
-			Text:     e.Message.Text,
-			User:     e.Message.User,
-			BotID:    e.Message.BotID,
-			Username: e.Message.Username,
+			Text:        e.Message.Text,
+			User:        e.Message.User,
+			BotID:       e.Message.BotID,
+			Username:    e.Message.Username,
+			Attachments: convertAttachments(e.Message.Attachments),
+			Blocks:      convertBlocks(e.Message.Blocks),
+			Files:       convertFiles(e.Message.Files),
 		}
 		if e.Message.BotProfile != nil {
 			ev.Nested.BotProfileName = e.Message.BotProfile.Name
@@ -480,105 +479,268 @@ func fromMessage(e *slackevents.MessageEvent) dispatch.IncomingEvent {
 	return ev
 }
 
+// convertAttachments / convertBlocks / convertFiles map slack-go types to
+// the package-neutral dispatch types so dispatch.MessageBody can flatten
+// rich content into the rendered triggering-message body.
+func convertAttachments(in []slack.Attachment) []dispatch.Attachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]dispatch.Attachment, 0, len(in))
+	for _, a := range in {
+		out = append(out, convertAttachment(a))
+	}
+	return out
+}
+
+func convertAttachment(a slack.Attachment) dispatch.Attachment {
+	out := dispatch.Attachment{
+		Fallback: a.Fallback,
+		Title:    a.Title,
+		Text:     a.Text,
+	}
+	for _, f := range a.Fields {
+		out.Fields = append(out.Fields, dispatch.AttachmentField{Title: f.Title, Value: f.Value})
+	}
+	return out
+}
+
+func convertBlocks(in slack.Blocks) []dispatch.Block {
+	if len(in.BlockSet) == 0 {
+		return nil
+	}
+	var out []dispatch.Block
+	for _, b := range in.BlockSet {
+		if d := blockToDispatch(b); d != nil {
+			out = append(out, *d)
+		}
+	}
+	return out
+}
+
+// blockToDispatch maps a slack.Block to a dispatch.Block with a best-effort
+// plain-text extraction. Block types we cannot meaningfully render to text
+// (image, divider, action, …) are skipped — the textual body alone is what
+// gets piped to the spawned command, and rendering those would just add
+// noise.
+func blockToDispatch(b slack.Block) *dispatch.Block {
+	switch v := b.(type) {
+	case *slack.SectionBlock:
+		parts := []string{}
+		if v.Text != nil && v.Text.Text != "" {
+			parts = append(parts, v.Text.Text)
+		}
+		for _, f := range v.Fields {
+			if f != nil && f.Text != "" {
+				parts = append(parts, f.Text)
+			}
+		}
+		text := strings.Join(parts, "\n")
+		if text == "" {
+			return nil
+		}
+		return &dispatch.Block{Type: "section", Text: text}
+	case *slack.HeaderBlock:
+		if v.Text == nil || v.Text.Text == "" {
+			return nil
+		}
+		return &dispatch.Block{Type: "header", Text: v.Text.Text}
+	case *slack.ContextBlock:
+		var parts []string
+		for _, el := range v.ContextElements.Elements {
+			if t, ok := el.(*slack.TextBlockObject); ok && t != nil && t.Text != "" {
+				parts = append(parts, t.Text)
+			}
+		}
+		if len(parts) == 0 {
+			return nil
+		}
+		return &dispatch.Block{Type: "context", Text: strings.Join(parts, " ")}
+	}
+	// rich_text blocks are intentionally skipped: Slack auto-generates them
+	// from the same body that lands in `text`, so flattening would
+	// duplicate (and on `app_mention` rules, re-inject the keyword that
+	// `command_text` mode just stripped). The text field is the source of
+	// truth for human-authored content.
+	return nil
+}
+
+func convertFiles(in []slack.File) []dispatch.File {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]dispatch.File, 0, len(in))
+	for _, f := range in {
+		url := f.URLPrivateDownload
+		if url == "" {
+			url = f.URLPrivate
+		}
+		out = append(out, dispatch.File{Name: f.Name, URL: url})
+	}
+	return out
+}
+
 // needsThreadFetch reports whether any part of the rule's stdin spec needs
-// the fetched thread. Plain `text` / `template` parts never trigger a fetch.
-func needsThreadFetch(s *config.StdinSpec) bool {
-	if s == nil {
-		return false
-	}
-	for _, p := range s.Parts {
-		if p.Kind == config.PartKindSlackThread {
+// the fetched thread. Only `thread:` parts require a fetch.
+func needsThreadFetch(parts []config.StdinPart) bool {
+	for _, p := range parts {
+		if p.Kind == config.PartKindThread {
 			return true
 		}
 	}
 	return false
 }
 
-// needsPermalink reports whether any template part references `{{permalink}}`.
-func needsPermalink(s *config.StdinSpec) bool {
-	if s == nil {
-		return false
-	}
-	for _, p := range s.Parts {
-		if p.Kind == config.PartKindTemplate && dispatch.TemplateUsesPermalink(p.Template) {
+// needsPermalink reports whether any `text:` part references {{event.permalink}}.
+func needsPermalink(parts []config.StdinPart) bool {
+	for _, p := range parts {
+		if p.Kind == config.PartKindText && dispatch.TemplateUsesPermalink(p.Text) {
 			return true
 		}
 	}
 	return false
 }
 
-// strictestFetchErrorPolicy returns the strictest on_fetch_error policy
-// across all slack_thread parts. `fail` wins over `fallback_event` so a
-// single strict part is enough to block the spawn. Empty/default is `fail`.
-func strictestFetchErrorPolicy(s *config.StdinSpec) string {
-	if s == nil {
-		return "fail"
-	}
-	hasFallback := false
-	for _, p := range s.Parts {
-		if p.Kind != config.PartKindSlackThread || p.SlackThread == nil {
-			continue
-		}
-		switch p.SlackThread.OnFetchError {
-		case "fallback_event":
-			hasFallback = true
-		case "fail", "":
-			return "fail"
+// threadFetchPolicy returns the `on_fetch_error` policy for the rule's
+// (at most one) thread part. Default is OnFetchErrorFail; absence of a
+// thread part means no policy is needed but we still return Fail so the
+// caller logic stays uniform.
+func threadFetchPolicy(parts []config.StdinPart) config.OnFetchErrorPolicy {
+	for _, p := range parts {
+		if p.Kind == config.PartKindThread && p.Thread != nil {
+			if p.Thread.OnFetchError != "" {
+				return p.Thread.OnFetchError
+			}
+			return config.OnFetchErrorFail
 		}
 	}
-	if hasFallback {
-		return "fallback_event"
-	}
-	return "fail"
+	return config.OnFetchErrorFail
+}
+
+// stdinBuildInput packs everything buildStdinPayload needs. Wrapped in a
+// struct so tests can pin individual fields without long positional argv.
+type stdinBuildInput struct {
+	Parts      []config.StdinPart
+	Vars       dispatch.TemplateVars
+	Event      dispatch.IncomingEvent
+	Match      dispatch.MatchResult
+	Thread     []slackthread.Message
+	Nonce      string
+	SelfUserID string
+	SelfBotID  string
 }
 
 // buildStdinPayload concatenates the rule's stdin parts into a single byte
-// stream suitable for piping to the child. Template parts are expanded with
-// the per-event vars; slack_thread parts are rendered against the fetched
-// thread (or a synthesized one when fetch fell back).
-//
-// triggerTS is the Slack ts of the event that started this run. It is used
-// to filter slack_thread parts that set ExcludeTriggeringMessage: those
-// parts emit the empty string instead of an empty <UNTRUSTED_SLACK_THREAD>
-// wrapper when the filtered list becomes empty (a typical case for a
-// standalone mention where the trigger is the only message in the thread).
-// Pass "" to apply no filtering (useful for dry-run preview without an
-// event payload).
-func buildStdinPayload(s *config.StdinSpec, vars dispatch.TemplateVars, thread []slackthread.Message, triggerTS string) string {
-	if s == nil {
-		return ""
-	}
+// stream suitable for piping to the child. Slack-derived parts that resolve
+// to empty (e.g. a thread part on a standalone mention with
+// IncludeTriggeringMessage:false) contribute nothing — their `heading:`
+// disappears with them.
+func buildStdinPayload(in stdinBuildInput) string {
 	var sb strings.Builder
-	for _, p := range s.Parts {
+	for _, p := range in.Parts {
 		switch p.Kind {
 		case config.PartKindText:
-			sb.WriteString(p.Text)
-		case config.PartKindTemplate:
-			sb.WriteString(dispatch.ExpandTemplate(p.Template, vars))
-		case config.PartKindSlackThread:
-			msgs := thread
-			if p.SlackThread != nil && p.SlackThread.ExcludeTriggeringMessage && triggerTS != "" {
-				msgs = excludeByTS(msgs, triggerTS)
-				if len(msgs) == 0 {
-					continue // empty after filter → contribute nothing
-				}
+			sb.WriteString(dispatch.ExpandTemplate(p.Text, in.Vars))
+
+		case config.PartKindTriggerMessage:
+			spec := p.TriggerMessage
+			if spec == nil {
+				spec = &config.TriggerMessageSpec{}
 			}
-			opts := slackthread.FormatOptions{}
-			if p.SlackThread != nil {
-				opts.Format = slackthread.Format(p.SlackThread.Format)
-				opts.MaxMessages = p.SlackThread.MaxMessages
-				opts.MaxBytes = p.SlackThread.MaxBytes
+			msg := buildTriggerMessage(in.Event, in.Match, spec.Content, in.SelfUserID, in.SelfBotID)
+			body := slackthread.RenderTriggerMessage(msg, slackthread.RenderOptions{
+				Nonce:             in.Nonce,
+				Format:            slackthread.FormatText,
+				IncludeTimestamps: spec.IncludeTimestamps,
+				Files:             slackthread.FilesMode(spec.Files),
+			})
+			writePartWithHeading(&sb, spec.Heading, body)
+
+		case config.PartKindThread:
+			spec := p.Thread
+			if spec == nil {
+				spec = &config.ThreadSpec{}
 			}
-			sb.WriteString(slackthread.Render(msgs, opts))
+			msgs := in.Thread
+			if !spec.IncludeTriggeringMessage && in.Event.TS != "" {
+				msgs = excludeByTS(msgs, in.Event.TS)
+			}
+			body := slackthread.RenderThread(msgs, slackthread.RenderOptions{
+				Nonce:             in.Nonce,
+				Format:            slackthread.Format(spec.Format),
+				MaxMessages:       spec.MaxMessages,
+				MaxBytes:          spec.MaxBytes,
+				IncludeTimestamps: spec.IncludeTimestamps,
+				Files:             slackthread.FilesMode(spec.Files),
+			})
+			writePartWithHeading(&sb, spec.Heading, body)
 		}
 	}
 	return sb.String()
 }
 
+// writePartWithHeading writes `heading\nbody` when body is non-empty; the
+// heading vanishes alongside an empty body so an absent thread does not
+// leave its label orphaned in stdin.
+func writePartWithHeading(sb *strings.Builder, heading, body string) {
+	if body == "" {
+		return
+	}
+	if heading != "" {
+		sb.WriteString(heading)
+		if !strings.HasSuffix(heading, "\n") {
+			sb.WriteByte('\n')
+		}
+	}
+	sb.WriteString(body)
+}
+
+// buildTriggerMessage assembles a slackthread.Message representing the
+// triggering Slack event for the trigger_message stdin part. Source is
+// resolved the same way the thread fetcher does it so the speaker tag is
+// consistent across parts.
+func buildTriggerMessage(ev dispatch.IncomingEvent, res dispatch.MatchResult, mode config.ContentMode, selfUserID, selfBotID string) slackthread.Message {
+	user := ev.User
+	botID := ev.BotID
+	if ev.Nested != nil {
+		if user == "" {
+			user = ev.Nested.User
+		}
+		if botID == "" {
+			botID = ev.Nested.BotID
+		}
+	}
+
+	msg := slackthread.Message{
+		TS:   ev.TS,
+		Text: dispatch.MessageBody(ev, res, mode),
+	}
+	for _, f := range dispatch.ExtractFiles(ev) {
+		msg.Files = append(msg.Files, slackthread.File{Name: f.Name, URL: f.URL})
+	}
+
+	switch {
+	case (selfUserID != "" && user == selfUserID) || (selfBotID != "" && botID == selfBotID):
+		msg.Source = slackthread.SourceSelf
+	case user != "":
+		msg.Source = slackthread.SourceUser
+		msg.User = user
+	default:
+		msg.Source = slackthread.SourceBot
+		name := firstNonEmpty(ev.Username, ev.BotProfileName)
+		if name == "" && ev.Nested != nil {
+			name = firstNonEmpty(ev.Nested.Username, ev.Nested.BotProfileName, ev.Nested.AppID)
+		}
+		if name == "" {
+			name = botID
+		}
+		msg.Bot = name
+	}
+	return msg
+}
+
 // excludeByTS returns msgs with any element whose TS equals ts removed.
-// Returns msgs unchanged when ts is empty or no match exists. We allocate
-// only when filtering actually removes something, since the common in-thread
-// case removes exactly one message.
+// Returns msgs unchanged when ts is empty or no match exists.
 func excludeByTS(msgs []slackthread.Message, ts string) []slackthread.Message {
 	if ts == "" {
 		return msgs
@@ -599,51 +761,8 @@ func excludeByTS(msgs []slackthread.Message, ts string) []slackthread.Message {
 	return out
 }
 
-// failedFetchProgressMessage is the body posted to Slack when thread fetch
-// fails under `on_fetch_error: fail`. Fixed wording — the original error
-// goes to logs, not the channel, to avoid leaking Slack API details (and
-// any PII the API might echo back) into the user-facing thread.
 func failedFetchProgressMessage() string {
 	return "❌ Thread fetch failed (see logs)"
-}
-
-// synthesizeFallbackThread builds a single-message thread from the
-// triggering event itself. Used when conversations.replies fails and the
-// rule asked for `on_fetch_error: fallback_event`. The message carries the
-// untrusted Slack content the formatter is already designed to mark.
-func synthesizeFallbackThread(ev dispatch.IncomingEvent, selfUserID, selfBotID string) []slackthread.Message {
-	text := dispatch.ExtractText(ev)
-	user := ev.User
-	botID := ev.BotID
-	if ev.Nested != nil {
-		if user == "" {
-			user = ev.Nested.User
-		}
-		if botID == "" {
-			botID = ev.Nested.BotID
-		}
-	}
-
-	m := slackthread.Message{TS: ev.TS, Text: text}
-	if (selfUserID != "" && user == selfUserID) || (selfBotID != "" && botID == selfBotID) {
-		m.Source = slackthread.SourceSelf
-		return []slackthread.Message{m}
-	}
-	if user != "" {
-		m.Source = slackthread.SourceUser
-		m.User = user
-		return []slackthread.Message{m}
-	}
-	m.Source = slackthread.SourceBot
-	name := firstNonEmpty(ev.Username, ev.BotProfileName)
-	if name == "" && ev.Nested != nil {
-		name = firstNonEmpty(ev.Nested.Username, ev.Nested.BotProfileName, ev.Nested.AppID)
-	}
-	if name == "" {
-		name = botID
-	}
-	m.Bot = name
-	return []slackthread.Message{m}
 }
 
 func firstNonEmpty(values ...string) string {
@@ -653,4 +772,17 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// generateNonce returns 8 hex chars (4 random bytes). Used as the suffix on
+// <UNTRUSTED_SLACK_*> tags so a Slack body cannot forge a closing tag.
+func generateNonce() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failure is exotic enough that we'd rather emit a
+		// constant suffix than panic the spawn. The marker still differs
+		// from the bare base tag name.
+		return "fallback"
+	}
+	return hex.EncodeToString(b)
 }
