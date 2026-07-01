@@ -7,6 +7,11 @@ at `check` time instead of being silently ignored.
 ## Shape
 
 ```yaml
+allowed_user_ids: [U…, U…]        # required if the file has any type: app_mention
+                                  # rule. Only these member IDs may @-mention the
+                                  # bot. Per-rule trigger.from.user_ids narrows
+                                  # this further.
+
 rules:
   - name: <kebab-case>            # required, unique
     description: <free text>      # optional, shown in `check` output
@@ -15,9 +20,11 @@ rules:
       # — message —
       channel: C…                 # required for `type: message`
       from:                       # required for `type: message`
-        bot_user_ids: [U…]
-        app_ids: [A…]
-        usernames: [SomeName]
+        user_ids: [U…]            #   humans or bot users (U/W-prefixed)
+        app_ids: [A…]             #   Slack apps (A-prefixed)
+        usernames: [SomeName]     #   display names — weakest signal
+        # any: true               #   opt-out: accept any sender (mutually
+                                  #   exclusive with the lists above)
       match_thread_replies: true  # optional, default true; false to skip
                                   # replies posted inside an existing thread
       # — both variants —
@@ -27,6 +34,9 @@ rules:
           required: true          # optional; miss → rule non-match (skipped)
       # — app_mention —
       keyword: <single token>     # optional; absent → default rule (max 1)
+      from:                       # optional; only `user_ids` allowed here.
+        user_ids: [U…]            #   Narrows top-level allowed_user_ids to a
+                                  #   subset for this rule (must be ⊆).
     action:                       # required
       cwd: /abs/path              # absolute path, or ~/xxx (expanded against $HOME)
       command: ["program", "arg"] # argv (no shell). NO `{{var}}` allowed here.
@@ -45,27 +55,34 @@ rules:
 `ALLOWED_USER_IDS`, `SLACKRUN_CHANNEL`, `SLACKRUN_TS`, `SLACKRUN_THREAD_TS`,
 `SLACKRUN_USER`. `SLACK_BOT_TOKEN` is forwarded only when
 `expose_slack_token: true`; `SLACK_APP_TOKEN` and `ALLOWED_USER_IDS` are
-always stripped from the child's environment (Socket Mode and
-authorization are the parent's concerns, not the child's). The
-`SLACKRUN_*` ones are injected automatically with the triggering event's
-coordinates so the child can call the read/write subcommands (`slackrun
--h` for the full list) without parsing arguments.
+always stripped from the child's environment. The `SLACKRUN_*` ones are
+injected automatically with the triggering event's coordinates so the
+child can call the read/write subcommands (`slackrun -h` for the full
+list) without parsing arguments.
 
 ## Matching
 
 - Rules are evaluated top-to-bottom; **first match wins**.
 - `type: app_mention` events match only `app_mention` rules;
   `type: message` events match only `message` rules.
+- **Sender authorization for `app_mention`**: top-level `allowed_user_ids`
+  gates all mentions before any rule runs. Users outside the list are logged
+  `unauthorized` and dropped. Per-rule `trigger.from.user_ids` narrows the
+  list further for that rule (must be a subset — enforced at load time).
 - `app_mention` rules with `keyword`: the first non-mention token of the
   message body is compared **case-insensitively, exact match**. A keyword-less
   rule is the default and must be unique within the file.
-- `type: message` rules trigger only if `trigger.from` matches one of:
-  - the bot's `U`-prefixed user_id (= `event.user`, or `event.message.user`
-    when subtype-nested)
-  - the app's `A`-prefixed `app_id`
-  - the bot's display `username`, compared case-insensitively
+- `type: message` rules trigger only if `trigger.from` matches. `from` is
+  required (there is no top-level gate for message rules); write
+  `from: { any: true }` to explicitly accept any sender. The individual
+  sub-fields match:
+  - `user_ids`: the sender's `U`/`W`-prefixed `user_id` (= `event.user`, or
+    `event.message.user` when subtype-nested). Both humans and bot users.
+  - `app_ids`: the app's `A`-prefixed `app_id`.
+  - `usernames`: the sender's display name, compared case-insensitively.
 - `B`-prefixed `event.bot_id` is intentionally not cross-checked against
-  `bot_user_ids`. If the bot only sends `bot_id`, use `app_ids` or `usernames`.
+  `user_ids`. If the sender publishes only `bot_id`, use `app_ids` or
+  `usernames`.
 - `match_thread_replies: false` narrows a `type: message` rule to top-level
   posts and thread parents (`thread_ts` empty or equal to `ts`); replies
   inside an existing thread are skipped. Useful when a bot posts follow-ups
@@ -80,7 +97,7 @@ coordinates so the child can call the read/write subcommands (`slackrun
   noisy notification body.
 
 `trigger.from.usernames` is the weakest signal — any incoming webhook can pick
-its own display name. Prefer `bot_user_ids` or `app_ids` when possible.
+its own display name. Prefer `user_ids` or `app_ids` when possible.
 
 ## `action.stdin`
 
@@ -374,6 +391,9 @@ Checks performed:
 - Duplicate `keyword`s on `app_mention` (case-insensitive)
 - Multiple keyword-less default mention rules (max one)
 - Slack ID format (`C…` / `U…` / `A…`)
+- `allowed_user_ids` is present when the file has any `type: app_mention` rule
+- Per-rule `trigger.from.user_ids` on `app_mention` is a subset of top-level `allowed_user_ids`
+- `trigger.from.any: true` is not mixed with the ID/name lists
 - `cwd` is absolute and exists
 - `command` is a non-empty argv
 - `timeout_ms` is positive

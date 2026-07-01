@@ -214,14 +214,14 @@ func Match(ev IncomingEvent, rules []config.Rule, ctx MatcherContext) MatchResul
 
 	rawText := ExtractText(ev)
 
-	// 3. Authorization for mentions — only ALLOWED_USER_IDS may invoke.
+	// 3. Authorization for mentions — only allowed_user_ids may invoke.
 	if ev.Type == "app_mention" {
 		if userID == "" || !containsString(ctx.AllowedUserIDs, userID) {
 			who := userID
 			if who == "" {
 				who = "<none>"
 			}
-			return MatchResult{Kind: MatchKindUnauthorized, Reason: "user " + who + " not in ALLOWED_USER_IDS"}
+			return MatchResult{Kind: MatchKindUnauthorized, Reason: "user " + who + " not in allowed_user_ids"}
 		}
 	}
 
@@ -233,7 +233,7 @@ func Match(ev IncomingEvent, rules []config.Rule, ctx MatcherContext) MatchResul
 			if r.Trigger.Type != config.TriggerTypeAppMention {
 				continue
 			}
-			if !matchMention(r, firstToken) {
+			if !matchMention(r, firstToken, userID) {
 				continue
 			}
 			extract, ok := runExtractors(ev, r)
@@ -296,7 +296,12 @@ func runExtractors(ev IncomingEvent, r *config.Rule) (map[string]string, bool) {
 	return out, true
 }
 
-func matchMention(r *config.Rule, firstToken string) bool {
+func matchMention(r *config.Rule, firstToken, userID string) bool {
+	if r.Trigger.From != nil && len(r.Trigger.From.UserIDs) > 0 {
+		if userID == "" || !containsString(r.Trigger.From.UserIDs, userID) {
+			return false
+		}
+	}
 	if r.Trigger.Keyword == nil {
 		return true // default rule
 	}
@@ -317,6 +322,9 @@ func matchMessage(ev IncomingEvent, userID string, r *config.Rule) bool {
 		return false
 	}
 	from := r.Trigger.From
+	if from.Any {
+		return true
+	}
 
 	appID := ev.AppID
 	username := ev.Username
@@ -335,7 +343,7 @@ func matchMessage(ev IncomingEvent, userID string, r *config.Rule) bool {
 		}
 	}
 
-	if len(from.BotUserIDs) > 0 && userID != "" && containsString(from.BotUserIDs, userID) {
+	if len(from.UserIDs) > 0 && userID != "" && containsString(from.UserIDs, userID) {
 		return true
 	}
 	if len(from.AppIDs) > 0 && appID != "" && containsString(from.AppIDs, appID) {
@@ -349,7 +357,7 @@ func matchMessage(ev IncomingEvent, userID string, r *config.Rule) bool {
 			}
 		}
 	}
-	// B-prefixed bot_id is intentionally not matched against bot_user_ids
+	// B-prefixed bot_id is intentionally not matched against user_ids
 	// (U-prefix). If the sender publishes only bot_id, use app_ids or
 	// usernames.
 	return false

@@ -21,15 +21,54 @@ const (
 	TriggerTypeAppMention TriggerType = "app_mention"
 )
 
-// TriggerFrom narrows `type: message` rules by sender. At least one of the
-// three lists must be non-empty (validated in ValidateRules).
+// TriggerFrom narrows a rule by sender. At least one of `user_ids` / `app_ids`
+// / `usernames` must be non-empty, OR `any: true` must be set (validated in
+// ValidateRules).
 //
-// `usernames` is the weakest signal — any incoming webhook can pick its own
-// display name. Prefer the ID-based fields when the source supports them.
+//   - user_ids: `U`/`W`-prefixed Slack member IDs, matched against event.user.
+//     Applies to both humans and bot users; the `bot_id` (B-prefix) namespace
+//     is separate — use `app_ids` for bots that only publish bot_id.
+//   - app_ids: `A`-prefixed Slack app IDs. Only meaningful for `type: message`
+//     — `app_mention` events are always human-authored.
+//   - usernames: display names (weakest signal — any incoming webhook can
+//     pick its own name). Only meaningful for `type: message`.
+//   - any: opt-in escape hatch to accept any sender. Mutually exclusive with
+//     the ID/name lists. Only meaningful for `type: message`; on
+//     `app_mention` the top-level `allowed_user_ids` already gates the
+//     sender.
 type TriggerFrom struct {
-	BotUserIDs []string `yaml:"bot_user_ids,omitempty"`
-	AppIDs     []string `yaml:"app_ids,omitempty"`
-	Usernames  []string `yaml:"usernames,omitempty"`
+	UserIDs   []string `yaml:"user_ids,omitempty"`
+	AppIDs    []string `yaml:"app_ids,omitempty"`
+	Usernames []string `yaml:"usernames,omitempty"`
+	Any       bool     `yaml:"any,omitempty"`
+}
+
+// rawTriggerFrom shadows TriggerFrom for strict decoding so we can detect the
+// legacy `bot_user_ids` key and surface a migration hint instead of the
+// unhelpful "field not found" from KnownFields.
+type rawTriggerFrom struct {
+	UserIDs       []string `yaml:"user_ids,omitempty"`
+	AppIDs        []string `yaml:"app_ids,omitempty"`
+	Usernames     []string `yaml:"usernames,omitempty"`
+	Any           bool     `yaml:"any,omitempty"`
+	LegacyBotUser []string `yaml:"bot_user_ids,omitempty"`
+}
+
+// UnmarshalYAML converts legacy `bot_user_ids` into a targeted error and
+// otherwise decodes the fields verbatim.
+func (f *TriggerFrom) UnmarshalYAML(node *yaml.Node) error {
+	var raw rawTriggerFrom
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	if len(raw.LegacyBotUser) > 0 {
+		return errors.New("trigger.from.bot_user_ids was renamed to `user_ids` (rename only — the match target has always been event.user's U/W-prefixed ID, human or bot user alike)")
+	}
+	f.UserIDs = raw.UserIDs
+	f.AppIDs = raw.AppIDs
+	f.Usernames = raw.Usernames
+	f.Any = raw.Any
+	return nil
 }
 
 // Trigger is a discriminated union over TriggerType. Unmarshaling validates
@@ -110,21 +149,37 @@ func (t *Trigger) UnmarshalYAML(node *yaml.Node) error {
 			return errors.New("trigger.channel is required for type: message")
 		}
 		if raw.From == nil {
-			return errors.New("trigger.from is required for type: message")
+			return errors.New("trigger.from is required for type: message (use `from: { any: true }` to opt out of sender filtering)")
 		}
 		t.Type = TriggerTypeMessage
 		t.Channel = raw.Channel
 		t.From = raw.From
 		t.MatchThreadReplies = raw.MatchThreadReplies
 	case string(TriggerTypeAppMention):
-		if raw.Channel != "" || raw.From != nil {
-			return errors.New("trigger.channel / trigger.from are only valid for type: message")
+		if raw.Channel != "" {
+			return errors.New("trigger.channel is only valid for type: message")
 		}
 		if raw.MatchThreadReplies != nil {
 			return errors.New("trigger.match_thread_replies is only valid for type: message")
 		}
+		if raw.From != nil {
+			// app_mention: only user_ids is meaningful. The event is always
+			// human-authored, so app_ids / usernames never fire; and per-rule
+			// sender filtering pairs with top-level allowed_user_ids, so
+			// `any: true` is redundant — omit `from` for the same effect.
+			if raw.From.Any {
+				return errors.New("trigger.from.any is not valid for type: app_mention (omit `from` for the same effect; top-level `allowed_user_ids` is the sender gate)")
+			}
+			if len(raw.From.AppIDs) > 0 || len(raw.From.Usernames) > 0 {
+				return errors.New("trigger.from on type: app_mention only accepts user_ids (app_mention events are always human-authored)")
+			}
+			if len(raw.From.UserIDs) == 0 {
+				return errors.New("trigger.from on type: app_mention must set user_ids (omit `from` entirely to accept any sender in allowed_user_ids)")
+			}
+		}
 		t.Type = TriggerTypeAppMention
 		t.Keyword = raw.Keyword
+		t.From = raw.From
 	default:
 		return fmt.Errorf("trigger.type must be \"message\" or \"app_mention\" (got %q)", raw.Type)
 	}
@@ -361,8 +416,15 @@ type Rule struct {
 }
 
 // RulesFile is the YAML document root.
+//
+// AllowedUserIDs is the top-level authorization list for `type: app_mention`
+// rules: only these `U`/`W`-prefixed member IDs may @-mention the bot.
+// Per-rule `trigger.from.user_ids` narrows this set further (must be a
+// subset; enforced at load time). Has no effect on `type: message` rules —
+// those use `trigger.from` for sender filtering, not authorization.
 type RulesFile struct {
-	Rules []Rule `yaml:"rules"`
+	AllowedUserIDs []string `yaml:"allowed_user_ids,omitempty"`
+	Rules          []Rule   `yaml:"rules"`
 }
 
 // ValidationIssueLevel separates fatal errors from soft warnings (warnings
@@ -437,8 +499,9 @@ var (
 
 // ValidationResult is what loaders return.
 type ValidationResult struct {
-	Rules  []Rule
-	Issues []ValidationIssue
+	Rules          []Rule
+	AllowedUserIDs []string
+	Issues         []ValidationIssue
 }
 
 // HasErrors reports whether any issue prevents startup.
@@ -488,14 +551,18 @@ func LoadRulesFile(path string, opts CheckOptions) (ValidationResult, error) {
 		}
 		parsed.Rules[i].Action.Cwd = expanded
 	}
-	issues := ValidateRules(parsed.Rules, opts)
+	issues := ValidateRulesFile(parsed, opts)
 	// Compile extract patterns for rules that validated cleanly. Skipping
 	// broken rules here avoids double-reporting a bad pattern (validateExtract
 	// already surfaced the compile error as an issue).
 	for i := range parsed.Rules {
 		compileExtractors(&parsed.Rules[i])
 	}
-	return ValidationResult{Rules: parsed.Rules, Issues: issues}, nil
+	return ValidationResult{
+		Rules:          parsed.Rules,
+		AllowedUserIDs: parsed.AllowedUserIDs,
+		Issues:         issues,
+	}, nil
 }
 
 // CompileForTest is a test-only helper that runs compileExtractors so tests
@@ -542,9 +609,77 @@ func expandHomeInCwd(cwd string) (string, error) {
 	return filepath.Join(home, cwd[2:]), nil
 }
 
-// ValidateRules runs the semantic checks on top of schema parsing. Returns a
-// flat list of issues; callers decide whether to abort.
+// ValidateRulesFile runs the semantic checks over both top-level and per-rule
+// fields. Returns a flat list of issues; callers decide whether to abort.
+func ValidateRulesFile(file RulesFile, opts CheckOptions) []ValidationIssue {
+	var issues []ValidationIssue
+
+	allowed := map[string]struct{}{}
+	for i, id := range file.AllowedUserIDs {
+		if !botUserIDRe.MatchString(id) {
+			issues = append(issues, ValidationIssue{
+				Level:   IssueError,
+				Message: fmt.Sprintf("allowed_user_ids[%d] %q must look like UXXXXXXXX", i, id),
+			})
+			continue
+		}
+		allowed[id] = struct{}{}
+	}
+
+	hasMention := false
+	for _, r := range file.Rules {
+		if r.Trigger.Type == TriggerTypeAppMention {
+			hasMention = true
+			break
+		}
+	}
+	switch {
+	case hasMention && len(file.AllowedUserIDs) == 0:
+		issues = append(issues, ValidationIssue{
+			Level:   IssueError,
+			Message: "allowed_user_ids is required when the file has any type: app_mention rule (top-level authorization list)",
+		})
+	case !hasMention && len(file.AllowedUserIDs) > 0:
+		// authorization list is only consulted for app_mention events; warn
+		// so the operator notices the dead setting rather than assume it's
+		// gating message rules.
+		issues = append(issues, ValidationIssue{
+			Level:   IssueWarn,
+			Message: "allowed_user_ids is set but no type: app_mention rules exist — the list has no effect (message rules gate on trigger.from)",
+		})
+	}
+
+	// Only run the subset check when a top-level list actually exists;
+	// otherwise the "not in top-level" errors are all downstream of the
+	// missing-list error above and would just add noise.
+	if len(allowed) > 0 {
+		for _, r := range file.Rules {
+			if r.Trigger.Type == TriggerTypeAppMention && r.Trigger.From != nil {
+				for _, id := range r.Trigger.From.UserIDs {
+					if _, ok := allowed[id]; !ok {
+						issues = append(issues, ValidationIssue{
+							Level:    IssueError,
+							RuleName: r.Name,
+							Message:  fmt.Sprintf("trigger.from.user_ids contains %q which is not in top-level allowed_user_ids", id),
+						})
+					}
+				}
+			}
+		}
+	}
+
+	issues = append(issues, validateRulesShared(file.Rules, opts)...)
+	return issues
+}
+
+// ValidateRules is the legacy entry point that skips top-level allowed_user_ids
+// checks. Retained for tests that hand-build a []Rule literal; new code should
+// call ValidateRulesFile.
 func ValidateRules(rules []Rule, opts CheckOptions) []ValidationIssue {
+	return validateRulesShared(rules, opts)
+}
+
+func validateRulesShared(rules []Rule, opts CheckOptions) []ValidationIssue {
 	var issues []ValidationIssue
 
 	for _, r := range rules {
@@ -694,33 +829,53 @@ func validateRule(r Rule) []ValidationIssue {
 			add(IssueError, fmt.Sprintf("trigger.channel %q must be a Slack channel ID like CXXXXXXXX", r.Trigger.Channel))
 		}
 		if r.Trigger.From != nil {
-			f := r.Trigger.From
-			total := len(f.BotUserIDs) + len(f.AppIDs) + len(f.Usernames)
-			if total == 0 {
-				add(IssueError, "trigger.from must list at least one of bot_user_ids/app_ids/usernames")
-			}
-			for _, id := range f.BotUserIDs {
-				if !botUserIDRe.MatchString(id) {
-					add(IssueError, fmt.Sprintf("trigger.from.bot_user_ids: %q must look like UXXXXXXXX", id))
-				}
-			}
-			for _, id := range f.AppIDs {
-				if !appIDRe.MatchString(id) {
-					add(IssueError, fmt.Sprintf("trigger.from.app_ids: %q must look like AXXXXXXXX", id))
-				}
-			}
-			for _, u := range f.Usernames {
-				if strings.TrimSpace(u) == "" {
-					add(IssueError, "trigger.from.usernames must not contain empty entries")
-				}
-			}
+			validateTriggerFrom(r.Trigger.From, add)
 		}
 	case TriggerTypeAppMention:
 		if r.Trigger.Keyword != nil && strings.TrimSpace(*r.Trigger.Keyword) == "" {
 			add(IssueError, "trigger.keyword must not be empty (omit the field for a default rule)")
 		}
+		if r.Trigger.From != nil {
+			// Shape-checked in UnmarshalYAML (user_ids only). Here we only
+			// validate the ID format.
+			for _, id := range r.Trigger.From.UserIDs {
+				if !botUserIDRe.MatchString(id) {
+					add(IssueError, fmt.Sprintf("trigger.from.user_ids: %q must look like UXXXXXXXX", id))
+				}
+			}
+		}
 	}
 	return out
+}
+
+// validateTriggerFrom is the message-variant validator: `any: true` is
+// mutually exclusive with the ID/name lists, and at least one must be set.
+func validateTriggerFrom(f *TriggerFrom, add func(ValidationIssueLevel, string)) {
+	total := len(f.UserIDs) + len(f.AppIDs) + len(f.Usernames)
+	if f.Any {
+		if total > 0 {
+			add(IssueError, "trigger.from.any is mutually exclusive with user_ids/app_ids/usernames")
+		}
+		return
+	}
+	if total == 0 {
+		add(IssueError, "trigger.from must list at least one of user_ids/app_ids/usernames, or set `any: true`")
+	}
+	for _, id := range f.UserIDs {
+		if !botUserIDRe.MatchString(id) {
+			add(IssueError, fmt.Sprintf("trigger.from.user_ids: %q must look like UXXXXXXXX", id))
+		}
+	}
+	for _, id := range f.AppIDs {
+		if !appIDRe.MatchString(id) {
+			add(IssueError, fmt.Sprintf("trigger.from.app_ids: %q must look like AXXXXXXXX", id))
+		}
+	}
+	for _, u := range f.Usernames {
+		if strings.TrimSpace(u) == "" {
+			add(IssueError, "trigger.from.usernames must not contain empty entries")
+		}
+	}
 }
 
 // validateStdin checks the parts list: empty array is an error, body

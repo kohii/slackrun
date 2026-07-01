@@ -25,14 +25,13 @@ const (
 // AppEnv is the validated set of environment variables slackrun consumes.
 // Built from process.env after .env has been merged in.
 type AppEnv struct {
-	SlackBotToken         string
-	SlackAppToken         string
-	AllowedUserIDs        []string
-	ConfigPath            string // resolved path to rules.yaml
-	MaxConcurrent         int
-	MinEventAgeMsAtBoot   int
-	LogLevel              string // debug | info | warn | error
-	AllowRawEventTextLog  bool
+	SlackBotToken        string
+	SlackAppToken        string
+	ConfigPath           string // resolved path to rules.yaml
+	MaxConcurrent        int
+	MinEventAgeMsAtBoot  int
+	LogLevel             string // debug | info | warn | error
+	AllowRawEventTextLog bool
 }
 
 // ExpandHome resolves a leading `~` to the user's home directory. Paths
@@ -100,16 +99,8 @@ func ParseEnv() (AppEnv, error) {
 		errs = append(errs, "SLACK_APP_TOKEN must start with xapp- (Socket Mode token)")
 	}
 
-	allowedRaw := os.Getenv("ALLOWED_USER_IDS")
-	var allowed []string
-	for _, p := range strings.Split(allowedRaw, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			allowed = append(allowed, p)
-		}
-	}
-	if len(allowed) == 0 {
-		errs = append(errs, "ALLOWED_USER_IDS is required (comma-separated Slack user IDs)")
+	if strings.TrimSpace(os.Getenv("ALLOWED_USER_IDS")) != "" {
+		errs = append(errs, "ALLOWED_USER_IDS env var was removed — move the list to `allowed_user_ids:` at the top of rules.yaml")
 	}
 
 	maxConc, err := parseIntDefault("MAX_CONCURRENT", defaultMaxConcurrent, func(n int) bool { return n > 0 }, "must be > 0")
@@ -146,7 +137,6 @@ func ParseEnv() (AppEnv, error) {
 	return AppEnv{
 		SlackBotToken:        bot,
 		SlackAppToken:        app,
-		AllowedUserIDs:       allowed,
 		ConfigPath:           ExpandHome(cfg),
 		MaxConcurrent:        maxConc,
 		MinEventAgeMsAtBoot:  minAge,

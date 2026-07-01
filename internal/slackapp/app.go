@@ -28,23 +28,25 @@ const threadFetchTimeout = 5 * time.Second
 
 // App is the long-lived slackrun process. Construct with New, then call Run.
 type App struct {
-	env        config.AppEnv
-	rules      []config.Rule
-	api        *slack.Client
-	sm         *socketmode.Client
-	semaphore  *runner.Semaphore
-	dedupe     *Dedupe
-	selfUserID string
-	selfBotID  string
+	env            config.AppEnv
+	rules          []config.Rule
+	allowedUserIDs []string
+	api            *slack.Client
+	sm             *socketmode.Client
+	semaphore      *runner.Semaphore
+	dedupe         *Dedupe
+	selfUserID     string
+	selfBotID      string
 
 	jobs *jobRegistry
 }
 
 // Options configures a new App. BootTime defaults to time.Now if zero.
 type Options struct {
-	Env      config.AppEnv
-	Rules    []config.Rule
-	BootTime time.Time
+	Env            config.AppEnv
+	Rules          []config.Rule
+	AllowedUserIDs []string
+	BootTime       time.Time
 }
 
 // New constructs an App and runs auth.test. Returns an error if auth.test
@@ -81,22 +83,23 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	sm := socketmode.New(api, socketmode.OptionDebug(opts.Env.LogLevel == "debug"))
 
 	app := &App{
-		env:        opts.Env,
-		rules:      opts.Rules,
-		api:        api,
-		sm:         sm,
-		semaphore:  sem,
-		dedupe:     d,
-		selfUserID: authResp.UserID,
-		selfBotID:  authResp.BotID,
-		jobs:       newJobRegistry(),
+		env:            opts.Env,
+		rules:          opts.Rules,
+		allowedUserIDs: opts.AllowedUserIDs,
+		api:            api,
+		sm:             sm,
+		semaphore:      sem,
+		dedupe:         d,
+		selfUserID:     authResp.UserID,
+		selfBotID:      authResp.BotID,
+		jobs:           newJobRegistry(),
 	}
 	logging.Info("bot ready",
 		logging.F("team", authResp.Team),
 		logging.F("user", authResp.User),
 		logging.F("selfUserId", authResp.UserID),
 		logging.F("selfBotId", authResp.BotID),
-		logging.F("allowedUserIds", opts.Env.AllowedUserIDs),
+		logging.F("allowedUserIds", opts.AllowedUserIDs),
 		logging.F("rules", ruleSummaries(opts.Rules)),
 	)
 	return app, nil
@@ -180,7 +183,7 @@ func (a *App) handleIncoming(ctx context.Context, ev dispatch.IncomingEvent) {
 	res := dispatch.Match(ev, a.rules, dispatch.MatcherContext{
 		SelfUserID:     a.selfUserID,
 		SelfBotID:      a.selfBotID,
-		AllowedUserIDs: a.env.AllowedUserIDs,
+		AllowedUserIDs: a.allowedUserIDs,
 	})
 	switch res.Kind {
 	case dispatch.MatchKindSkip:

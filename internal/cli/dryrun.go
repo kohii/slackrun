@@ -59,7 +59,7 @@ func RunDryRun(args []string, stdout, stderr io.Writer) int {
 	eventPath := fs.String("event", "", "path to JSON file containing a Slack event")
 	selfUser := fs.String("self-user-id", "U00SELFTEST", "the bot's own Slack user ID (used for self-loop guard)")
 	selfBot := fs.String("self-bot-id", "", "the bot's own B-prefixed bot ID (optional)")
-	allowed := fs.String("allowed-user-ids", "", "comma-separated user IDs allowed to invoke mentions")
+	allowed := fs.String("allowed-user-ids", "", "override rules.yaml top-level allowed_user_ids (comma-separated)")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
@@ -115,7 +115,10 @@ func RunDryRun(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	allowedIDs := splitCSV(*allowed)
+	allowedIDs := rulesResult.AllowedUserIDs
+	if *allowed != "" {
+		allowedIDs = splitCSV(*allowed)
+	}
 	res := dispatch.Match(dispEv, rulesResult.Rules, dispatch.MatcherContext{
 		SelfUserID:     *selfUser,
 		SelfBotID:      *selfBot,

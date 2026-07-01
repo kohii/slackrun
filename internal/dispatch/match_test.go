@@ -272,6 +272,61 @@ func TestMatch_MessageNested(t *testing.T) {
 	}
 }
 
+func TestMatch_MessageFromAnyMatchesAnySender(t *testing.T) {
+	t.Parallel()
+	ev := IncomingEvent{
+		Type: "message", Subtype: "",
+		Channel: "C01ALERT", User: "U99RANDOM",
+	}
+	rules := []config.Rule{newRule("catch-all", config.Trigger{
+		Type:    config.TriggerTypeMessage,
+		Channel: "C01ALERT",
+		From:    &config.TriggerFrom{Any: true},
+	})}
+	res := Match(ev, rules, MatcherContext{})
+	if res.Kind != MatchKindMatched {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+func TestMatch_MessageByUserIDMatchesHuman(t *testing.T) {
+	t.Parallel()
+	// user_ids should hit for human posters too — the point of the rename.
+	ev := IncomingEvent{
+		Type: "message", Subtype: "",
+		Channel: "C01ALERT", User: "U01HUMAN",
+	}
+	rules := []config.Rule{newRule("kick-off", config.Trigger{
+		Type:    config.TriggerTypeMessage,
+		Channel: "C01ALERT",
+		From:    &config.TriggerFrom{UserIDs: []string{"U01HUMAN"}},
+	})}
+	res := Match(ev, rules, MatcherContext{})
+	if res.Kind != MatchKindMatched {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+func TestMatch_MentionFromUserIDNarrowsFurther(t *testing.T) {
+	t.Parallel()
+	ev := IncomingEvent{Type: "app_mention", User: "U01SECOND", Text: "<@U01BOT> deploy staging"}
+	rules := []config.Rule{
+		newRule("kohii-deploy", config.Trigger{
+			Type:    config.TriggerTypeAppMention,
+			Keyword: ptr("deploy"),
+			From:    &config.TriggerFrom{UserIDs: []string{"U01FIRST"}},
+		}),
+		newRule("everyone-deploy", config.Trigger{
+			Type:    config.TriggerTypeAppMention,
+			Keyword: ptr("deploy"),
+		}),
+	}
+	res := Match(ev, rules, MatcherContext{AllowedUserIDs: []string{"U01FIRST", "U01SECOND"}})
+	if res.Kind != MatchKindMatched || res.Rule.Name != "everyone-deploy" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
 func TestMatch_NoMatch(t *testing.T) {
 	t.Parallel()
 	ev := IncomingEvent{Type: "message", Channel: "C01OTHER"}

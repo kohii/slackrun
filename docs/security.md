@@ -9,8 +9,8 @@ below are the design.
 |---|---|
 | `cwd` is never derived from Slack input | rules.yaml is the only source; absolute paths required, existence checked at boot. |
 | `command` argv is never derived from Slack input | The argv lives entirely in rules.yaml. `{{var}}` tokens are rejected in argv elements; variable content can only enter the child via `action.stdin`. |
-| Only known senders trigger `type: message` rules | The schema makes `trigger.from` mandatory for `type: message`, with at least one of `bot_user_ids` / `app_ids` / `usernames`. |
-| Only allowed users can `@bot` | `ALLOWED_USER_IDS` env var; everything else is logged `unauthorized` and dropped. |
+| Only known senders trigger `type: message` rules | The schema makes `trigger.from` mandatory for `type: message`, with at least one of `user_ids` / `app_ids` / `usernames`, or an explicit `any: true`. |
+| Only allowed users can `@bot` | Top-level `allowed_user_ids` in rules.yaml; everything else is logged `unauthorized` and dropped. Per-rule `trigger.from.user_ids` narrows the list further. |
 | Self-loop prevention | `auth.test` resolves the bot's own user_id / bot_id; events matching either are skipped. |
 | `event.text` does not leak to logs by default | The log layer strips `text` / `blocks` / `attachments` from any event passed in; only `ALLOW_RAW_EVENT_TEXT_LOG=true` (debug only) restores `text`, still after PII redaction. |
 
@@ -57,11 +57,11 @@ The trailing `_ab12cd34` is a per-spawn random suffix on the tag name, so a
 Slack body that writes a literal `</UNTRUSTED_SLACK_THREAD>` cannot escape
 the wrapper.
 
-Authorization (`ALLOWED_USER_IDS`) gates only the **trigger** event, not the
-thread's history. Other users' (and bots') prior messages in the same thread
-are still piped to the child. Treat them as untrusted data and instruct the
-downstream AI to consider its system prompt the authority, not anything
-inside the tags.
+Authorization (top-level `allowed_user_ids`) gates only the **trigger**
+event, not the thread's history. Other users' (and bots') prior messages
+in the same thread are still piped to the child. Treat them as untrusted
+data and instruct the downstream AI to consider its system prompt the
+authority, not anything inside the tags.
 
 slackrun's own prior replies are labelled `[self bot ts=...]` so the AI can
 distinguish them from genuine user input. Self-detection compares Slack's
@@ -127,15 +127,15 @@ calls can reference the triggering event without parsing rules:
 ## Child environment
 
 godotenv loads `.env` into the parent process's environment at startup, so
-`SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `ALLOWED_USER_IDS` are visible to
-slackrun itself. `os.Environ()` would otherwise flow straight to the
-spawned command; slackrun now filters that pass-through:
+`SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` are visible to slackrun itself.
+`os.Environ()` would otherwise flow straight to the spawned command;
+slackrun now filters that pass-through:
 
 | Variable | Default child visibility |
 |---|---|
 | `SLACK_BOT_TOKEN` | hidden — set `expose_slack_token: true` on the rule to opt in |
 | `SLACK_APP_TOKEN` | always stripped (Socket Mode is the parent's job) |
-| `ALLOWED_USER_IDS` | always stripped (authorization happens in the parent) |
+| `ALLOWED_USER_IDS` | always stripped (defence-in-depth; authorization lives in rules.yaml) |
 | Everything else | passed through unchanged |
 
 `action.env` can override any non-reserved variable. Writing a reserved key
@@ -193,6 +193,6 @@ command: [bash, -c, 'claude -p "$(cat)"']   # cat reads stdin in the shell
   `.claude/settings.json`) to restrict tool / network access per workspace.
 - Prompt injection from Slack messages: a malicious authorized user can ask
   the downstream program to do anything within its permissions. The
-  mitigation is `ALLOWED_USER_IDS` (= "only you").
+  mitigation is `allowed_user_ids` (= "only you").
 - The command's downstream actions (Notion writes, GitHub PRs, etc.). Those
   are the command's responsibility; slackrun just hands it argv + cwd.

@@ -7,6 +7,9 @@ import (
 	"testing"
 )
 
+// parseAndValidate exercises only the per-rule checks so individual tests
+// don't have to boilerplate a top-level allowed_user_ids. See
+// parseAndValidateFile for the full ValidateRulesFile path.
 func parseAndValidate(t *testing.T, yamlText string) ValidationResult {
 	t.Helper()
 	parsed, err := ParseRulesYAML([]byte(yamlText), "<test>")
@@ -14,19 +17,34 @@ func parseAndValidate(t *testing.T, yamlText string) ValidationResult {
 		t.Fatalf("parse: %v", err)
 	}
 	return ValidationResult{
-		Rules:  parsed.Rules,
-		Issues: ValidateRules(parsed.Rules, CheckOptions{SkipFsChecks: true}),
+		Rules:          parsed.Rules,
+		AllowedUserIDs: parsed.AllowedUserIDs,
+		Issues:         ValidateRules(parsed.Rules, CheckOptions{SkipFsChecks: true}),
+	}
+}
+
+func parseAndValidateFile(t *testing.T, yamlText string) ValidationResult {
+	t.Helper()
+	parsed, err := ParseRulesYAML([]byte(yamlText), "<test>")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	return ValidationResult{
+		Rules:          parsed.Rules,
+		AllowedUserIDs: parsed.AllowedUserIDs,
+		Issues:         ValidateRulesFile(parsed, CheckOptions{SkipFsChecks: true}),
 	}
 }
 
 const validSample = `
+allowed_user_ids: [U01OK]
 rules:
   - name: sentry
     trigger:
       type: message
       channel: C01ALERT123
       from:
-        bot_user_ids: [U01SENTRY1]
+        user_ids: [U01SENTRY1]
         app_ids: [A01SENTRY1]
         usernames: ["Sentry"]
     action:
@@ -196,7 +214,7 @@ rules:
     trigger:
       type: message
       channel: nope
-      from: { bot_user_ids: ["B01invalid"] }
+      from: { user_ids: ["B01invalid"] }
     action: { cwd: relative/path, command: [], timeout_ms: 0 }
 `
 	res := parseAndValidate(t, src)
@@ -214,6 +232,208 @@ rules:
 	}
 	if !hasIssue(res.Issues, "timeout_ms must be > 0") {
 		t.Fatalf("missing timeout issue: %+v", res.Issues)
+	}
+}
+
+func TestValidate_LegacyBotUserIDsRejected(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: x
+    trigger:
+      type: message
+      channel: C01X1234
+      from: { bot_user_ids: [U01SENTRY1] }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000 }
+`
+	_, err := ParseRulesYAML([]byte(src), "<test>")
+	if err == nil {
+		t.Fatal("expected error on legacy bot_user_ids field")
+	}
+	if !strings.Contains(err.Error(), "renamed to `user_ids`") {
+		t.Fatalf("expected migration hint, got: %v", err)
+	}
+}
+
+func TestValidate_FromAny(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01X1234
+      from: { any: true }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %+v", res.Issues)
+	}
+	if !res.Rules[0].Trigger.From.Any {
+		t.Fatal("expected from.any = true")
+	}
+}
+
+func TestValidate_FromAnyRejectsMix(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01X1234
+      from: { any: true, user_ids: [U01SENTRY1] }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "mutually exclusive") {
+		t.Fatalf("expected mutex error, got: %+v", res.Issues)
+	}
+}
+
+func TestValidate_AppMentionAcceptsFromUserIDs(t *testing.T) {
+	t.Parallel()
+	src := `
+allowed_user_ids: [U01OK]
+rules:
+  - name: r
+    trigger:
+      type: app_mention
+      keyword: deploy
+      from: { user_ids: [U01OK] }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	res := parseAndValidateFile(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %+v", res.Issues)
+	}
+}
+
+func TestValidate_AppMentionRejectsFromAppIDs(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: app_mention
+      from: { app_ids: [A01SENTRY] }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	_, err := ParseRulesYAML([]byte(src), "<test>")
+	if err == nil {
+		t.Fatal("expected error rejecting from.app_ids on app_mention")
+	}
+}
+
+func TestValidate_AppMentionRejectsFromAny(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: app_mention
+      from: { any: true }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	_, err := ParseRulesYAML([]byte(src), "<test>")
+	if err == nil {
+		t.Fatal("expected error rejecting from.any on app_mention")
+	}
+}
+
+func TestValidate_TopLevelAllowedUserIDsRequired(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	res := parseAndValidateFile(t, src)
+	if !hasIssue(res.Issues, "allowed_user_ids is required") {
+		t.Fatalf("expected top-level requirement, got: %+v", res.Issues)
+	}
+}
+
+func TestValidate_PerRuleFromMustBeSubsetOfAllowed(t *testing.T) {
+	t.Parallel()
+	src := `
+allowed_user_ids: [U01OK]
+rules:
+  - name: r
+    trigger:
+      type: app_mention
+      keyword: r
+      from: { user_ids: [U99OUTSIDE] }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	res := parseAndValidateFile(t, src)
+	if !hasIssue(res.Issues, "not in top-level allowed_user_ids") {
+		t.Fatalf("expected subset error, got: %+v", res.Issues)
+	}
+}
+
+func TestValidate_AllowedUserIDsWarnsWhenNoMention(t *testing.T) {
+	t.Parallel()
+	src := `
+allowed_user_ids: [U01OK]
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01X1234
+      from: { any: true }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	res := parseAndValidateFile(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %+v", res.Issues)
+	}
+	var sawWarn bool
+	for _, i := range res.Issues {
+		if i.Level == IssueWarn && strings.Contains(i.Message, "no effect") {
+			sawWarn = true
+		}
+	}
+	if !sawWarn {
+		t.Fatalf("expected dead-setting warn: %+v", res.Issues)
+	}
+}
+
+func TestValidate_SubsetCheckSuppressedWhenTopLevelMissing(t *testing.T) {
+	t.Parallel()
+	// If top-level is missing, only the "required" error should surface;
+	// per-rule subset noise would just distract.
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: app_mention
+      from: { user_ids: [U99OUTSIDE] }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	res := parseAndValidateFile(t, src)
+	if !hasIssue(res.Issues, "allowed_user_ids is required") {
+		t.Fatalf("expected required error: %+v", res.Issues)
+	}
+	if hasIssue(res.Issues, "not in top-level") {
+		t.Fatalf("subset noise should be suppressed: %+v", res.Issues)
+	}
+}
+
+func TestValidate_AllowedUserIDsFormat(t *testing.T) {
+	t.Parallel()
+	src := `
+allowed_user_ids: ["not-a-slack-id"]
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action: { cwd: /tmp, command: [echo], timeout_ms: 1000, stdin: [{text: "hi"}] }
+`
+	res := parseAndValidateFile(t, src)
+	if !hasIssue(res.Issues, "must look like UXXXXXXXX") {
+		t.Fatalf("expected format error, got: %+v", res.Issues)
 	}
 }
 
@@ -914,6 +1134,7 @@ func TestLoadRulesFile_ExpandsHomeInCwd(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	src := `
+allowed_user_ids: [U01OK]
 rules:
   - name: r
     trigger: { type: app_mention, keyword: r }

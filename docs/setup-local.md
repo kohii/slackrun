@@ -19,8 +19,8 @@ slackrun reads two files from `~/.config/slackrun/`:
 
 | File | Purpose |
 |---|---|
-| `.env` | Slack tokens, allowed user IDs, optional knobs (`MAX_CONCURRENT`, `LOG_LEVEL`, …). Permissions must be `600`. |
-| `rules.yaml` | Event-to-command routing. Validate with `slackrun check`. |
+| `.env` | Slack tokens and optional knobs (`MAX_CONCURRENT`, `LOG_LEVEL`, …). Permissions must be `600`. |
+| `rules.yaml` | Event-to-command routing, plus top-level `allowed_user_ids` for @mention authorization. Validate with `slackrun check`. |
 
 ```sh
 mkdir -p ~/.config/slackrun

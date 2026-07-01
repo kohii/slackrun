@@ -69,7 +69,11 @@ func RunStart(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	app, err := slackapp.New(ctx, slackapp.Options{Env: env, Rules: rules.Rules})
+	app, err := slackapp.New(ctx, slackapp.Options{
+		Env:            env,
+		Rules:          rules.Rules,
+		AllowedUserIDs: rules.AllowedUserIDs,
+	})
 	if err != nil {
 		logging.Error("startup failed", logging.F("error", err))
 		return 1

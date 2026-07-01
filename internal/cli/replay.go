@@ -50,7 +50,7 @@ Flags:
   --message-ts <TS>            when a thread permalink is ambiguous, force
                                which message in the thread is the trigger
   --rule <name>                restrict matching to a single rule
-  --allowed-user-ids <U…,U…>   overrides ALLOWED_USER_IDS from the env
+  --allowed-user-ids <U…,U…>   overrides rules.yaml top-level allowed_user_ids
   --timeout <ms>               override the matched rule's timeout_ms
   --dry-stdin                  print the rendered stdin (and env) and exit;
                                do not spawn the child
@@ -82,7 +82,7 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 	tsFlag := fs.String("ts", "", "message ts (with --channel, alternative to --permalink)")
 	messageTSFlag := fs.String("message-ts", "", "when a thread permalink is ambiguous, force the trigger's ts")
 	ruleFlag := fs.String("rule", "", "restrict matching to a single named rule")
-	allowedFlag := fs.String("allowed-user-ids", "", "override ALLOWED_USER_IDS from env (comma-separated)")
+	allowedFlag := fs.String("allowed-user-ids", "", "override rules.yaml top-level allowed_user_ids (comma-separated)")
 	timeoutFlag := fs.Int("timeout", 0, "override the matched rule's timeout_ms (0 = use rule value)")
 	dryStdin := fs.Bool("dry-stdin", false, "print rendered stdin + env and exit without spawning")
 	printEvent := fs.Bool("print-event", false, "print the constructed IncomingEvent as JSON")
@@ -160,7 +160,7 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		_ = enc.Encode(map[string]any{"incoming_event": ev})
 	}
 
-	allowedIDs := envAllowedUserIDs()
+	allowedIDs := loaded.AllowedUserIDs
 	if *allowedFlag != "" {
 		allowedIDs = splitCSV(*allowedFlag)
 	}
@@ -409,10 +409,6 @@ func filterByName(rules []config.Rule, name string) []config.Rule {
 		}
 	}
 	return nil
-}
-
-func envAllowedUserIDs() []string {
-	return splitCSV(os.Getenv("ALLOWED_USER_IDS"))
 }
 
 func onOff(b bool) string {

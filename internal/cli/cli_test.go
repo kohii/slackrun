@@ -10,6 +10,7 @@ import (
 )
 
 const sampleRules = `
+allowed_user_ids: [U01OK]
 rules:
   - name: mention-default
     trigger:
@@ -26,7 +27,7 @@ rules:
       type: message
       channel: C01ALERT0
       from:
-        bot_user_ids: [U01SENTRY1]
+        user_ids: [U01SENTRY1]
     action:
       cwd: %s
       command: ["echo"]

@@ -37,21 +37,26 @@ Do this in whatever channel a `type: message` rule references.
 
 A `type: message` rule filters by either:
 
-- `bot_user_ids`: the `U`-prefixed ID the sender posts as. Visible by clicking
-  the sender's name in Slack → *View profile* → the URL contains the user ID.
+- `user_ids`: the `U`/`W`-prefixed ID the sender posts as (humans and bot
+  users alike). Visible by clicking the sender's name in Slack → *View
+  profile* → the URL contains the user ID.
 - `app_ids`: the `A`-prefixed app ID. Visible on the app's config in
   *Manage* → *Apps* → click the app.
 - `usernames`: matched case-insensitively. Less robust because incoming
   webhooks can pick arbitrary names — prefer ID-based matching when the
   source supports it.
 
+Or explicitly opt out of filtering with `from: { any: true }` (accepts any
+sender in the channel).
+
 If you're unsure which is delivering messages, run with `LOG_LEVEL=debug` and
 watch the `dispatcher no-match` log lines for the event payload.
 
 ## 5. Allowed mention users
 
-`ALLOWED_USER_IDS` (comma-separated) in `.env` lists the users whose `@bot`
+Top-level `allowed_user_ids` in `rules.yaml` lists the users whose `@bot`
 mentions slackrun will act on. Anyone else is silently ignored (logged as
-`unauthorized`).
+`unauthorized`). Per-rule `trigger.from.user_ids` on an `app_mention` rule
+narrows the list further.
 
 Your own `U…` ID is visible from your Slack profile (⋮ menu → *Copy member ID*).
