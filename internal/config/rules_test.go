@@ -694,6 +694,78 @@ rules:
 	}
 }
 
+func TestTrigger_MatchThreadRepliesDefault(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01ALERT123
+      from: { usernames: ["Sentry"] }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: hi
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected: %+v", res.Issues)
+	}
+	if !res.Rules[0].Trigger.AllowsThreadReplies() {
+		t.Error("default should allow thread replies")
+	}
+}
+
+func TestTrigger_MatchThreadRepliesFalse(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01ALERT123
+      from: { usernames: ["Sentry"] }
+      match_thread_replies: false
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: hi
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected: %+v", res.Issues)
+	}
+	if res.Rules[0].Trigger.AllowsThreadReplies() {
+		t.Error("match_thread_replies:false should disallow thread replies")
+	}
+}
+
+func TestTrigger_MatchThreadRepliesRejectedOnMention(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: app_mention
+      keyword: r
+      match_thread_replies: false
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: hi
+`
+	if _, err := ParseRulesYAML([]byte(src), "<test>"); err == nil {
+		t.Fatal("expected error rejecting match_thread_replies on app_mention")
+	}
+}
+
 func TestExpandHomeInCwd(t *testing.T) {
 	t.Setenv("HOME", "/home/tester")
 	cases := []struct {

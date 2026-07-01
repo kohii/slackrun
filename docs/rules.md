@@ -18,6 +18,8 @@ rules:
         bot_user_ids: [U…]
         app_ids: [A…]
         usernames: [SomeName]
+      match_thread_replies: true  # optional, default true; false to skip
+                                  # replies posted inside an existing thread
       # — app_mention —
       keyword: <single token>     # optional; absent → default rule (max 1)
     action:                       # required
@@ -59,6 +61,10 @@ coordinates so the child can call the read/write subcommands (`slackrun
   - the bot's display `username`, compared case-insensitively
 - `B`-prefixed `event.bot_id` is intentionally not cross-checked against
   `bot_user_ids`. If the bot only sends `bot_id`, use `app_ids` or `usernames`.
+- `match_thread_replies: false` narrows a `type: message` rule to top-level
+  posts and thread parents (`thread_ts` empty or equal to `ts`); replies
+  inside an existing thread are skipped. Useful when a bot posts follow-ups
+  into an existing incident thread and you only want to react to the root.
 
 `trigger.from.usernames` is the weakest signal — any incoming webhook can pick
 its own display name. Prefer `bot_user_ids` or `app_ids` when possible.

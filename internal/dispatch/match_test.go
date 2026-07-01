@@ -129,6 +129,55 @@ func TestMatch_MessageByUsernameCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestMatch_MessageSkipsThreadReply(t *testing.T) {
+	t.Parallel()
+	falseVal := false
+	rule := newRule("sentry", config.Trigger{
+		Type:               config.TriggerTypeMessage,
+		Channel:            "C01ALERT",
+		From:               &config.TriggerFrom{Usernames: []string{"Sentry"}},
+		MatchThreadReplies: &falseVal,
+	})
+	// Thread reply (ThreadTS != TS) should be skipped.
+	ev := IncomingEvent{
+		Type: "message", Subtype: "bot_message",
+		Channel: "C01ALERT", BotProfileName: "Sentry",
+		TS: "2.0", ThreadTS: "1.0",
+	}
+	if res := Match(ev, []config.Rule{rule}, MatcherContext{}); res.Kind == MatchKindMatched {
+		t.Fatalf("expected no match on thread reply, got %+v", res)
+	}
+	// Top-level (ThreadTS empty) still matches.
+	top := ev
+	top.TS, top.ThreadTS = "3.0", ""
+	if res := Match(top, []config.Rule{rule}, MatcherContext{}); res.Kind != MatchKindMatched {
+		t.Fatalf("expected match on top-level, got %+v", res)
+	}
+	// Thread parent (ThreadTS == TS) is not a reply — must still match.
+	parent := ev
+	parent.TS, parent.ThreadTS = "4.0", "4.0"
+	if res := Match(parent, []config.Rule{rule}, MatcherContext{}); res.Kind != MatchKindMatched {
+		t.Fatalf("expected match on thread parent, got %+v", res)
+	}
+}
+
+func TestMatch_MessageThreadReplyMatchesByDefault(t *testing.T) {
+	t.Parallel()
+	rule := newRule("sentry", config.Trigger{
+		Type:    config.TriggerTypeMessage,
+		Channel: "C01ALERT",
+		From:    &config.TriggerFrom{Usernames: []string{"Sentry"}},
+	})
+	ev := IncomingEvent{
+		Type: "message", Subtype: "bot_message",
+		Channel: "C01ALERT", BotProfileName: "Sentry",
+		TS: "2.0", ThreadTS: "1.0",
+	}
+	if res := Match(ev, []config.Rule{rule}, MatcherContext{}); res.Kind != MatchKindMatched {
+		t.Fatalf("expected default-behaviour match on thread reply, got %+v", res)
+	}
+}
+
 func TestMatch_MessageNested(t *testing.T) {
 	t.Parallel()
 	ev := IncomingEvent{

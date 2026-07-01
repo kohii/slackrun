@@ -47,6 +47,8 @@ rules:
         bot_user_ids: [UXXXSENTRYXXX]     # Sentry official app (if used)
         app_ids: [AXXXSENTRYXXX]          # Incoming Webhook app (if used)
         usernames: ["Sentry"]
+      match_thread_replies: false         # skip Sentry follow-ups inside an
+                                          # existing incident thread (double-fire)
     action:
       cwd: /path/to/your/workspace        # replace with an absolute path
       command: [claude, -p]               # reads prompt from stdin

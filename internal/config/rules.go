@@ -42,19 +42,32 @@ type Trigger struct {
 	// message variant
 	Channel string       `yaml:"channel,omitempty"`
 	From    *TriggerFrom `yaml:"from,omitempty"`
+	// MatchThreadReplies opts out of matching replies posted inside an
+	// existing thread. nil (default) matches both top-level and thread
+	// replies; false matches only top-level messages and thread parents.
+	// Only meaningful for type: message.
+	MatchThreadReplies *bool `yaml:"match_thread_replies,omitempty"`
 
 	// app_mention variant. nil means "default rule" (matches when no other
 	// keyword rule matched); at most one such rule may exist per file.
 	Keyword *string `yaml:"keyword,omitempty"`
 }
 
+// AllowsThreadReplies reports whether the trigger accepts messages posted
+// inside a thread (i.e. thread_ts != ts). Default true; opt-out via
+// `match_thread_replies: false`.
+func (t Trigger) AllowsThreadReplies() bool {
+	return t.MatchThreadReplies == nil || *t.MatchThreadReplies
+}
+
 // rawTrigger is the strict-decode shadow type — we parse into it first so we
 // can reject unexpected fields, then fold the result into Trigger.
 type rawTrigger struct {
-	Type    string       `yaml:"type"`
-	Channel string       `yaml:"channel,omitempty"`
-	From    *TriggerFrom `yaml:"from,omitempty"`
-	Keyword *string      `yaml:"keyword,omitempty"`
+	Type               string       `yaml:"type"`
+	Channel            string       `yaml:"channel,omitempty"`
+	From               *TriggerFrom `yaml:"from,omitempty"`
+	MatchThreadReplies *bool        `yaml:"match_thread_replies,omitempty"`
+	Keyword            *string      `yaml:"keyword,omitempty"`
 }
 
 // UnmarshalYAML enforces the discriminated-union shape.
@@ -77,9 +90,13 @@ func (t *Trigger) UnmarshalYAML(node *yaml.Node) error {
 		t.Type = TriggerTypeMessage
 		t.Channel = raw.Channel
 		t.From = raw.From
+		t.MatchThreadReplies = raw.MatchThreadReplies
 	case string(TriggerTypeAppMention):
 		if raw.Channel != "" || raw.From != nil {
 			return errors.New("trigger.channel / trigger.from are only valid for type: message")
+		}
+		if raw.MatchThreadReplies != nil {
+			return errors.New("trigger.match_thread_replies is only valid for type: message")
 		}
 		t.Type = TriggerTypeAppMention
 		t.Keyword = raw.Keyword

@@ -265,6 +265,9 @@ func matchMessage(ev IncomingEvent, userID string, r *config.Rule) bool {
 	if r.Trigger.From == nil {
 		return false
 	}
+	if !r.Trigger.AllowsThreadReplies() && isThreadReply(ev) {
+		return false
+	}
 	from := r.Trigger.From
 
 	appID := ev.AppID
@@ -302,6 +305,13 @@ func matchMessage(ev IncomingEvent, userID string, r *config.Rule) bool {
 	// (U-prefix). If the sender publishes only bot_id, use app_ids or
 	// usernames.
 	return false
+}
+
+// isThreadReply reports whether the event is a reply posted inside an
+// existing thread. A thread parent (ThreadTS == TS) is treated as a top-level
+// message so a rule that dropped thread replies still fires on the root.
+func isThreadReply(ev IncomingEvent) bool {
+	return ev.ThreadTS != "" && ev.ThreadTS != ev.TS
 }
 
 // MessageBody returns the text body of the triggering message for the
