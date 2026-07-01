@@ -10,7 +10,7 @@ One-time setup to create the Slack app and gather the tokens slackrun needs.
 
 The manifest enables:
 
-- Bot scopes: `app_mentions:read`, `chat:write`, `channels:history`, `groups:history`, `files:write`, `reactions:read`, `reactions:write`, `usergroups:read`, `users:read`
+- Bot scopes: `app_mentions:read`, `chat:write`, `channels:read`, `channels:history`, `groups:read`, `groups:history`, `im:read`, `im:history`, `mpim:read`, `mpim:history`, `files:read`, `files:write`, `reactions:read`, `reactions:write`, `usergroups:read`, `users:read`, `users:read.email`
 - Bot events: `app_mention`, `message.channels`, `message.groups`
 - Socket Mode (so no public endpoint is required)
 

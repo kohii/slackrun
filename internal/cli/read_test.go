@@ -2,8 +2,11 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -252,5 +255,248 @@ func TestRunUsergroups_ForwardsOptions(t *testing.T) {
 	}
 	if fake.gotN != 3 {
 		t.Errorf("expected 3 options, got %d", fake.gotN)
+	}
+}
+
+// --- user --email lookup ---
+
+func (f *fakeUserClient) GetUserByEmail(email string) (*slack.User, error) {
+	f.got = "email:" + email
+	return f.user, f.err
+}
+
+func TestRunUser_ByEmail(t *testing.T) {
+	t.Parallel()
+	fake := &fakeUserClient{user: &slack.User{ID: "U9", Profile: slack.UserProfile{Email: "x@y"}}}
+	var out, errBuf bytes.Buffer
+	code := runUserWith([]string{"--email", "x@y"}, &out, &errBuf, fake)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, errBuf.String())
+	}
+	if fake.got != "email:x@y" {
+		t.Fatalf("email lookup not invoked: %q", fake.got)
+	}
+}
+
+func TestRunUser_UserAndEmailMutuallyExclusive(t *testing.T) {
+	t.Parallel()
+	var out, errBuf bytes.Buffer
+	code := runUserWith([]string{"--user", "U1", "--email", "x@y"}, &out, &errBuf, &fakeUserClient{})
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2", code)
+	}
+	if !strings.Contains(errBuf.String(), "mutually exclusive") {
+		t.Errorf("stderr should hint at exclusivity: %q", errBuf.String())
+	}
+}
+
+// --- channel (info) ---
+
+type fakeChannelClient struct {
+	ch  *slack.Channel
+	err error
+	got *slack.GetConversationInfoInput
+}
+
+func (f *fakeChannelClient) GetConversationInfo(input *slack.GetConversationInfoInput) (*slack.Channel, error) {
+	f.got = input
+	return f.ch, f.err
+}
+
+func TestRunChannel_DefaultsFromEnv(t *testing.T) {
+	t.Setenv("SLACKRUN_CHANNEL", "C_ENV")
+	ch := &slack.Channel{}
+	ch.ID = "C_ENV"
+	ch.Name = "general"
+	fake := &fakeChannelClient{ch: ch}
+	var out, errBuf bytes.Buffer
+	code := runChannelWith(nil, &out, &errBuf, fake)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, errBuf.String())
+	}
+	if fake.got.ChannelID != "C_ENV" {
+		t.Fatalf("channel not defaulted: %+v", fake.got)
+	}
+	if !strings.Contains(out.String(), `"name":"general"`) {
+		t.Errorf("body missing name: %s", out.String())
+	}
+}
+
+// --- channels (list) ---
+
+type fakeChannelsClient struct {
+	channels []slack.Channel
+	cursor   string
+	err      error
+	got      *slack.GetConversationsParameters
+}
+
+func (f *fakeChannelsClient) GetConversations(params *slack.GetConversationsParameters) ([]slack.Channel, string, error) {
+	f.got = params
+	return f.channels, f.cursor, f.err
+}
+
+func TestRunChannels_ParsesTypesCSV(t *testing.T) {
+	t.Parallel()
+	fake := &fakeChannelsClient{}
+	var out, errBuf bytes.Buffer
+	code := runChannelsWith(
+		[]string{"--types", "public_channel,private_channel", "--exclude-archived"},
+		&out, &errBuf, fake,
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, errBuf.String())
+	}
+	if len(fake.got.Types) != 2 || !fake.got.ExcludeArchived {
+		t.Fatalf("params not forwarded: %+v", fake.got)
+	}
+}
+
+func TestRunChannels_LimitBounds(t *testing.T) {
+	t.Parallel()
+	var out, errBuf bytes.Buffer
+	if code := runChannelsWith([]string{"--limit", "0"}, &out, &errBuf, &fakeChannelsClient{}); code != 2 {
+		t.Errorf("--limit 0 should be usage error, got %d", code)
+	}
+	if code := runChannelsWith([]string{"--limit", "1001"}, &out, &errBuf, &fakeChannelsClient{}); code != 2 {
+		t.Errorf("--limit 1001 should be usage error, got %d", code)
+	}
+}
+
+// --- users (list) ---
+
+type fakeUsersClient struct {
+	users []slack.User
+	err   error
+	nOpts int
+}
+
+func (f *fakeUsersClient) GetUsers(options ...slack.GetUsersOption) ([]slack.User, error) {
+	f.nOpts = len(options)
+	return f.users, f.err
+}
+
+func TestRunUsers_Happy(t *testing.T) {
+	t.Parallel()
+	fake := &fakeUsersClient{users: []slack.User{{ID: "U1"}, {ID: "U2"}}}
+	var out, errBuf bytes.Buffer
+	code := runUsersWith([]string{"--presence"}, &out, &errBuf, fake)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, errBuf.String())
+	}
+	if fake.nOpts != 1 {
+		t.Errorf("expected 1 option (presence), got %d", fake.nOpts)
+	}
+	if !strings.Contains(out.String(), `"id":"U1"`) {
+		t.Errorf("body missing users: %s", out.String())
+	}
+}
+
+// --- file (info + download) ---
+
+type fakeFileClient struct {
+	info *slack.File
+	err  error
+	gotF string
+}
+
+func (f *fakeFileClient) GetFileInfo(fileID string, count, page int) (*slack.File, []slack.Comment, *slack.Paging, error) {
+	f.gotF = fileID
+	return f.info, nil, nil, f.err
+}
+
+type fakeDownloader struct {
+	body     string
+	gotURL   string
+	gotToken string
+	err      error
+}
+
+func (f *fakeDownloader) Download(_ context.Context, url, token string, w io.Writer) error {
+	f.gotURL = url
+	f.gotToken = token
+	if f.err != nil {
+		return f.err
+	}
+	_, err := w.Write([]byte(f.body))
+	return err
+}
+
+func TestRunFile_Info(t *testing.T) {
+	t.Parallel()
+	fake := &fakeFileClient{info: &slack.File{ID: "F1", Name: "report.pdf"}}
+	var out, errBuf bytes.Buffer
+	code := runFileWith(
+		[]string{"--file", "F1"},
+		&out, &errBuf, fake, &fakeDownloader{}, "xoxb-fake",
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), `"name":"report.pdf"`) {
+		t.Errorf("metadata missing name: %s", out.String())
+	}
+}
+
+func TestRunFile_DownloadToStdout(t *testing.T) {
+	t.Parallel()
+	fake := &fakeFileClient{info: &slack.File{
+		ID: "F1", URLPrivateDownload: "https://files.slack/perma",
+	}}
+	dl := &fakeDownloader{body: "PDF bytes"}
+	var out, errBuf bytes.Buffer
+	code := runFileWith(
+		[]string{"--file", "F1", "--output", "-"},
+		&out, &errBuf, fake, dl, "xoxb-token",
+	)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, errBuf.String())
+	}
+	if dl.gotToken != "xoxb-token" {
+		t.Errorf("token not forwarded: %q", dl.gotToken)
+	}
+	if dl.gotURL != "https://files.slack/perma" {
+		t.Errorf("URL not forwarded: %q", dl.gotURL)
+	}
+	if out.String() != "PDF bytes" {
+		t.Errorf("body not streamed: %q", out.String())
+	}
+}
+
+func TestRunFile_MissingFile_Usage(t *testing.T) {
+	t.Parallel()
+	var out, errBuf bytes.Buffer
+	code := runFileWith(nil, &out, &errBuf, &fakeFileClient{}, &fakeDownloader{}, "x")
+	if code != 2 {
+		t.Fatalf("exit=%d, want 2", code)
+	}
+}
+
+func TestRunFile_DownloadToPath_AtomicOnFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := dir + "/existing.pdf"
+	// Pre-populate the target so we can verify the failed download did not
+	// clobber it.
+	original := []byte("pre-existing content")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeFileClient{info: &slack.File{ID: "F1", URLPrivateDownload: "https://x"}}
+	dl := &fakeDownloader{err: errors.New("net")}
+	var out, errBuf bytes.Buffer
+	code := runFileWith(
+		[]string{"--file", "F1", "--output", path},
+		&out, &errBuf, fake, dl, "x",
+	)
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Errorf("existing file was clobbered on failure: got %q", got)
 	}
 }

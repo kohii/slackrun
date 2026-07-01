@@ -43,6 +43,22 @@ func main() {
 		os.Exit(cli.RunUser(os.Args[2:], os.Stdout, os.Stderr))
 	case "usergroups":
 		os.Exit(cli.RunUsergroups(os.Args[2:], os.Stdout, os.Stderr))
+	case "update":
+		os.Exit(cli.RunUpdate(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	case "ephemeral":
+		os.Exit(cli.RunEphemeral(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	case "unreact":
+		os.Exit(cli.RunUnreact(os.Args[2:], os.Stdout, os.Stderr))
+	case "me":
+		os.Exit(cli.RunMe(os.Args[2:], os.Stdout, os.Stderr))
+	case "channel":
+		os.Exit(cli.RunChannel(os.Args[2:], os.Stdout, os.Stderr))
+	case "channels":
+		os.Exit(cli.RunChannels(os.Args[2:], os.Stdout, os.Stderr))
+	case "users":
+		os.Exit(cli.RunUsers(os.Args[2:], os.Stdout, os.Stderr))
+	case "file":
+		os.Exit(cli.RunFile(os.Args[2:], os.Stdout, os.Stderr))
 	case "version", "--version", "-v":
 		fmt.Println(Version)
 	case "help", "--help", "-h":

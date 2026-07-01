@@ -70,17 +70,26 @@ Rules can set `expose_slack_token: true` to forward `SLACK_BOT_TOKEN` to the
 spawned process, which can then call back:
 
 ```sh
-# writes (previous stdout, no return value beyond {"channel","ts"} for post):
-slackrun post   --text "investigating…"
-slackrun react  --emoji eyes
-slackrun upload --file ./report.txt
+# writes (return {"channel","ts"} on success):
+slackrun post      --text "investigating…"
+slackrun update    --ts 1700000000.0 --text "done"   # edit an earlier post
+slackrun ephemeral --text "only you can see this"    # visible to --user only
+slackrun react     --emoji eyes
+slackrun unreact   --emoji eyes                       # remove a reaction
+slackrun upload    --file ./report.txt
 
 # reads (JSON to stdout so the child can parse):
 slackrun history    --limit 20            # conversations.history for the triggering channel
 slackrun replies                          # conversations.replies for the triggering thread
 slackrun reactions                        # reactions.get on the triggering message
+slackrun channel                          # conversations.info for the triggering channel
+slackrun channels                         # conversations.list
 slackrun user                             # users.info for the triggering user
+slackrun user       --email x@y.com       # users.lookupByEmail (needs users:read.email)
+slackrun users                            # users.list
 slackrun usergroups --include-users       # usergroups.list (with member IDs)
+slackrun file       --file F123           # files.info; add --output PATH to download bytes
+slackrun me                               # auth.test — bot's own identity
 ```
 
 `SLACKRUN_CHANNEL`, `SLACKRUN_TS`, `SLACKRUN_THREAD_TS`, `SLACKRUN_USER` are

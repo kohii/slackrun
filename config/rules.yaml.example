@@ -20,9 +20,11 @@
 #                       <UNTRUSTED_SLACK_THREAD> tags (max 1 per rule).
 #                       Renders empty (and disappears) when there is no
 #                       thread.
-#   - slackrun_help: {} injects the full child-side CLI help (writes:
-#                       post/react/upload; reads: history/replies/reactions/
-#                       user/usergroups). Pairs with expose_slack_token: true.
+#   - slackrun_help: {} injects the full child-side CLI help — writes
+#                       (post/update/ephemeral/react/unreact/upload) and
+#                       reads (history/replies/reactions/channel/channels/
+#                       user/users/usergroups/file/me). Pairs with
+#                       expose_slack_token: true.
 #
 # `action.reply_with_stdout: false` (default true) makes slackrun skip the
 # stdout-as-Slack-reply behaviour after a successful exit. Use it when the

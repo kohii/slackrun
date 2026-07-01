@@ -91,15 +91,16 @@ A boot self-check verifies each pattern still strips a representative fixture
 (`util.RunRedactSelfCheck`). Failures are logged but the bot keeps running so
 missing masks do not block real alerts.
 
-## Child CLI (`slackrun post|react|upload|history|replies|reactions|user|usergroups`)
+## Child CLI (writes: `post|update|ephemeral|react|unreact|upload`; reads: `history|replies|reactions|channel|channels|user|users|usergroups|file|me`)
 
 When a rule sets `expose_slack_token: true`, the spawned child receives
 `SLACK_BOT_TOKEN` and can call back into slackrun for both writes
-(`post` / `react` / `upload`) and reads (`history` / `replies` /
-`reactions` / `user` / `usergroups`) — or, equivalently, call the Slack
-API directly with `curl`. **The CLI's PII redaction and operation
-allow-list are conveniences, not enforced boundaries.** Anything the
-child can do with the token, slackrun can't prevent.
+(`post` / `update` / `ephemeral` / `react` / `unreact` / `upload`) and
+reads (`history` / `replies` / `reactions` / `channel` / `channels` /
+`user` / `users` / `usergroups` / `file` / `me`) — or, equivalently, call
+the Slack API directly with `curl`. **The CLI's PII redaction and
+operation allow-list are conveniences, not enforced boundaries.**
+Anything the child can do with the token, slackrun can't prevent.
 
 In practice that means: a child with `expose_slack_token: true` is a
 **trusted child holding the full Bot scope**. Use the rule's `cwd` and the
@@ -110,10 +111,10 @@ Sanitisation that *is* applied when the child calls slackrun's CLI:
 
 | Subcommand | Sanitised fields |
 |---|---|
-| `post`   | `--text` body |
+| `post` / `update` / `ephemeral` | `--text` body |
 | `upload` | `--file` content, `--title`, `--initial-comment`, the filename Slack displays |
-| `react`  | nothing — emoji name and Slack IDs only, no free-form input |
-| read subcommands | none — the JSON body flowing to the child's stdout is unredacted. Treat it as untrusted Slack input on the child's side. |
+| `react` / `unreact` | nothing — emoji name and Slack IDs only, no free-form input |
+| read subcommands (incl. `file --output`) | none — the JSON body / file bytes flowing to the child's stdout are unredacted. Treat them as untrusted Slack input on the child's side. |
 
 slackrun also injects four read-only vars into the child's env so the CLI
 calls can reference the triggering event without parsing rules:

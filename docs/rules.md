@@ -42,8 +42,7 @@ always stripped from the child's environment (Socket Mode and
 authorization are the parent's concerns, not the child's). The
 `SLACKRUN_*` ones are injected automatically with the triggering event's
 coordinates so the child can call the read/write subcommands (`slackrun
-post|react|upload|history|replies|reactions|user|usergroups`) without
-parsing arguments.
+-h` for the full list) without parsing arguments.
 
 ## Matching
 
@@ -76,7 +75,7 @@ A part is exactly one of:
 | `text:` | Author-written instructions. Trusted content. May contain `{{event.*}}` metadata variables (see below). |
 | `trigger_message:` | The Slack message that triggered the rule, rendered as an untrusted block. Max 1 per rule. |
 | `thread:` | The Slack thread the triggering message lives in, rendered as an untrusted block. Max 1 per rule. |
-| `slackrun_help: {}` | Inject the static help for the child-side CLI (`slackrun post/react/upload/history/replies/reactions/user/usergroups`). Use when the child is an LLM that needs to learn how to interact with Slack. Pairs with `expose_slack_token: true`. |
+| `slackrun_help: {}` | Inject the static help for the full child-side CLI (writes + reads; see `slackrun -h`). Use when the child is an LLM that needs to learn how to interact with Slack. Pairs with `expose_slack_token: true`. |
 
 ### Trust boundary
 

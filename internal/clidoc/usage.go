@@ -18,16 +18,25 @@ package clidoc
 const ChildUsage = `Slack CLI callable from spawned children (requires expose_slack_token: true on the rule):
 
   Write:
-    slackrun post   [--channel C...] [--thread-ts T] --text TEXT    (--text - reads stdin)
-    slackrun react  [--channel C...] [--ts T] --emoji NAME
-    slackrun upload [--channel C...] [--thread-ts T] --file PATH [--title T] [--initial-comment T]
+    slackrun post      [--channel C...] [--thread-ts T] --text TEXT       (--text - reads stdin)
+    slackrun update    [--channel C...] --ts T --text TEXT                (edit a prior message)
+    slackrun ephemeral [--channel C...] [--user U...] --text TEXT [--thread-ts T]
+    slackrun react     [--channel C...] [--ts T] --emoji NAME
+    slackrun unreact   [--channel C...] [--ts T] --emoji NAME
+    slackrun upload    [--channel C...] [--thread-ts T] --file PATH [--title T] [--initial-comment T]
 
   Read (JSON to stdout):
     slackrun history    [--channel C...] [--limit N] [--cursor CUR] [--oldest TS] [--latest TS]
     slackrun replies    [--channel C...] [--thread-ts T] [--limit N] [--cursor CUR]
     slackrun reactions  [--channel C...] [--ts T] [--full]
-    slackrun user       [--user U...]
+    slackrun channel    [--channel C...] [--include-num-members]
+    slackrun channels   [--types public_channel,private_channel,im,mpim] [--exclude-archived] [--limit N] [--cursor CUR]
+    slackrun user       [--user U...]                        (users.info)
+    slackrun user       --email x@y.com                       (users.lookupByEmail — needs users:read.email)
+    slackrun users      [--limit N] [--presence] [--team-id T]
     slackrun usergroups [--include-users] [--include-disabled] [--team-id T]
+    slackrun file       --file F... [--output PATH]         (JSON metadata; --output downloads body)
+    slackrun me                                              (this bot's identity from auth.test)
 
   Channel/ts/thread_ts/user default to SLACKRUN_CHANNEL / SLACKRUN_TS /
   SLACKRUN_THREAD_TS / SLACKRUN_USER, which slackrun injects on every spawn.

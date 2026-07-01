@@ -14,12 +14,20 @@ oauth_config:
       - app_mentions:read
       - chat:write
       - channels:history
+      - channels:read
       - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - mpim:history
+      - mpim:read
+      - files:read
       - files:write
       - reactions:read
       - reactions:write
       - usergroups:read
       - users:read
+      - users:read.email
 
 settings:
   event_subscriptions:

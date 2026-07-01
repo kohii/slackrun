@@ -331,9 +331,12 @@ func TestBuildStdinPayload_SlackrunHelpInjectsChildUsage(t *testing.T) {
 	// Both write and read subcommands must appear in the injected help so
 	// an LLM child sees the whole surface, not just half of it.
 	wantSubcommands := []string{
-		"slackrun post", "slackrun react", "slackrun upload",
+		"slackrun post", "slackrun update", "slackrun ephemeral",
+		"slackrun react", "slackrun unreact", "slackrun upload",
 		"slackrun history", "slackrun replies", "slackrun reactions",
-		"slackrun user", "slackrun usergroups",
+		"slackrun channel", "slackrun channels",
+		"slackrun user", "slackrun users", "slackrun usergroups",
+		"slackrun file", "slackrun me",
 	}
 	for _, want := range wantSubcommands {
 		if !strings.Contains(out, want) {
