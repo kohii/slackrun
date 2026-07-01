@@ -141,11 +141,12 @@ const (
 	// PartKindThread renders the thread the trigger lives in, wrapped in
 	// <UNTRUSTED_SLACK_THREAD_<nonce>> tags. At most one per rule.
 	PartKindThread
-	// PartKindSlackrunHelp injects clidoc.WriteUsage — the static help for
-	// the slackrun post / react / upload subcommands — into stdin. Useful
-	// when the spawned program is an LLM that needs to learn how to post
-	// back. Requires `expose_slack_token: true` on the rule (warning at
-	// load time if missing).
+	// PartKindSlackrunHelp injects clidoc.ChildUsage — the static help for
+	// the child-facing subcommands (post / react / upload plus the
+	// read side: history / replies / reactions / user / usergroups) — into
+	// stdin. Useful when the spawned program is an LLM that needs to learn
+	// how to interact with Slack. Requires `expose_slack_token: true` on
+	// the rule (warning at load time if missing).
 	PartKindSlackrunHelp
 )
 

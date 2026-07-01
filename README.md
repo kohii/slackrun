@@ -37,7 +37,7 @@ matched rule can pick them. That is the main security boundary; see
 | `text:` | Author-written instructions. Trusted. |
 | `trigger_message:` | The Slack message that fired the rule, wrapped in `<UNTRUSTED_SLACK_MESSAGE>` tags. Max 1. |
 | `thread:` | The Slack thread the trigger lives in, wrapped in `<UNTRUSTED_SLACK_THREAD>` tags. Max 1. Renders empty (the whole part, including its optional `heading:`, disappears) when there is no thread. |
-| `slackrun_help: {}` | Injects `slackrun post/react/upload` usage so an LLM child can learn how to reply. Pairs with `expose_slack_token: true`. |
+| `slackrun_help: {}` | Injects the full child-CLI usage (writes + reads) so an LLM child can learn how to interact with Slack. Pairs with `expose_slack_token: true`. |
 
 ```yaml
 - name: mention-default
@@ -64,23 +64,30 @@ forgery). `text:` is the only place author instructions live; it accepts
 body variables at load time. See `docs/rules.md` for the full schema and
 `docs/security.md` for the trust model.
 
-## Write-back from the child
+## Child-side CLI
 
 Rules can set `expose_slack_token: true` to forward `SLACK_BOT_TOKEN` to the
 spawned process, which can then call back:
 
 ```sh
-# inside the spawned command — channel / ts / thread_ts default to the
-# SLACKRUN_* env vars slackrun injects, so the short form just works:
+# writes (previous stdout, no return value beyond {"channel","ts"} for post):
 slackrun post   --text "investigating…"
 slackrun react  --emoji eyes
 slackrun upload --file ./report.txt
+
+# reads (JSON to stdout so the child can parse):
+slackrun history    --limit 20            # conversations.history for the triggering channel
+slackrun replies                          # conversations.replies for the triggering thread
+slackrun reactions                        # reactions.get on the triggering message
+slackrun user                             # users.info for the triggering user
+slackrun usergroups --include-users       # usergroups.list (with member IDs)
 ```
 
 `SLACKRUN_CHANNEL`, `SLACKRUN_TS`, `SLACKRUN_THREAD_TS`, `SLACKRUN_USER` are
-injected on every spawn. Pass `--channel` / `--ts` / `--thread-ts` explicitly
-to target a different message. Read `docs/security.md` before opting in — a
-child with the token can do anything the Bot scope allows.
+injected on every spawn, so `--channel` / `--ts` / `--thread-ts` / `--user`
+default to the triggering event. Pass them explicitly to target a different
+message. Read `docs/security.md` before opting in — a child with the token
+can do anything the Bot scope allows.
 
 When the child posts its own replies, set `action.reply_with_stdout: false`
 so slackrun does not also dump stdout as a final reply. The progress

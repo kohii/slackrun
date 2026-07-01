@@ -31,7 +31,7 @@ rules:
         - text: "static instructions"
         - trigger_message: { content: command_text }
         - thread: { include_triggering_message: false }
-        - slackrun_help: {}       # inject write-CLI help text for the child
+        - slackrun_help: {}       # inject child-CLI help text (post/react/upload/history/…)
 ```
 
 `action.env` cannot set reserved keys: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
@@ -41,7 +41,8 @@ rules:
 always stripped from the child's environment (Socket Mode and
 authorization are the parent's concerns, not the child's). The
 `SLACKRUN_*` ones are injected automatically with the triggering event's
-coordinates so the child can call `slackrun post|react|upload` without
+coordinates so the child can call the read/write subcommands (`slackrun
+post|react|upload|history|replies|reactions|user|usergroups`) without
 parsing arguments.
 
 ## Matching
@@ -75,7 +76,7 @@ A part is exactly one of:
 | `text:` | Author-written instructions. Trusted content. May contain `{{event.*}}` metadata variables (see below). |
 | `trigger_message:` | The Slack message that triggered the rule, rendered as an untrusted block. Max 1 per rule. |
 | `thread:` | The Slack thread the triggering message lives in, rendered as an untrusted block. Max 1 per rule. |
-| `slackrun_help: {}` | Inject the static help for `slackrun post/react/upload`. Use when the child is an LLM that needs to learn how to reply. Pairs with `expose_slack_token: true`. |
+| `slackrun_help: {}` | Inject the static help for the child-side CLI (`slackrun post/react/upload/history/replies/reactions/user/usergroups`). Use when the child is an LLM that needs to learn how to interact with Slack. Pairs with `expose_slack_token: true`. |
 
 ### Trust boundary
 
@@ -214,10 +215,11 @@ part on "is there a thread?".
 
 ### `slackrun_help:`
 
-Emits the same write-CLI help block that `slackrun -h` prints, so an LLM
-child can learn how to call back into slackrun for replies, reactions, and
-file uploads. Plain text, no wrapper tags — it is author-trusted
-documentation, not Slack-derived data.
+Emits the same child-CLI help block that `slackrun -h` prints — both the
+write side (`post` / `react` / `upload`) and the read side (`history` /
+`replies` / `reactions` / `user` / `usergroups`) — so an LLM child can
+learn how to interact with Slack from its prompt. Plain text, no wrapper
+tags — it is author-trusted documentation, not Slack-derived data.
 
 ```yaml
 - slackrun_help: {}
@@ -226,6 +228,11 @@ documentation, not Slack-derived data.
 Pairs with `action.expose_slack_token: true`: the documented subcommands
 need `SLACK_BOT_TOKEN` to reach the child. `slackrun check` warns when a
 rule includes `slackrun_help` without the token forwarding.
+
+Read subcommands print a single JSON line to stdout so the child can
+parse the response directly. Writes still print a small
+`{"channel": "...", "ts": "..."}` acknowledgement (or nothing, for
+`react`). See `slackrun -h` for the exact flag list.
 
 ## Reply mode
 

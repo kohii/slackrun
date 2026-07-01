@@ -710,7 +710,7 @@ func buildStdinPayload(in stdinBuildInput) string {
 			writePartWithHeading(&sb, spec.Heading, body)
 
 		case config.PartKindSlackrunHelp:
-			sb.WriteString(clidoc.WriteUsage)
+			sb.WriteString(clidoc.ChildUsage)
 		}
 	}
 	return sb.String()

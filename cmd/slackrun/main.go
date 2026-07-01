@@ -33,6 +33,16 @@ func main() {
 		os.Exit(cli.RunReact(os.Args[2:], os.Stdout, os.Stderr))
 	case "upload":
 		os.Exit(cli.RunUpload(os.Args[2:], os.Stdout, os.Stderr))
+	case "history":
+		os.Exit(cli.RunHistory(os.Args[2:], os.Stdout, os.Stderr))
+	case "replies":
+		os.Exit(cli.RunReplies(os.Args[2:], os.Stdout, os.Stderr))
+	case "reactions":
+		os.Exit(cli.RunReactions(os.Args[2:], os.Stdout, os.Stderr))
+	case "user":
+		os.Exit(cli.RunUser(os.Args[2:], os.Stdout, os.Stderr))
+	case "usergroups":
+		os.Exit(cli.RunUsergroups(os.Args[2:], os.Stdout, os.Stderr))
 	case "version", "--version", "-v":
 		fmt.Println(Version)
 	case "help", "--help", "-h":

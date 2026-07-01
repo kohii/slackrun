@@ -318,7 +318,7 @@ func TestDecideCompletion(t *testing.T) {
 	}
 }
 
-func TestBuildStdinPayload_SlackrunHelpInjectsWriteUsage(t *testing.T) {
+func TestBuildStdinPayload_SlackrunHelpInjectsChildUsage(t *testing.T) {
 	t.Parallel()
 	parts := []config.StdinPart{
 		{Kind: config.PartKindText, Text: "Lead:\n"},
@@ -328,11 +328,17 @@ func TestBuildStdinPayload_SlackrunHelpInjectsWriteUsage(t *testing.T) {
 	if !strings.HasPrefix(out, "Lead:\n") {
 		t.Errorf("missing text prefix: %q", out)
 	}
-	if !strings.Contains(out, "slackrun post") {
-		t.Errorf("expected write-CLI usage injected: %q", out)
+	// Both write and read subcommands must appear in the injected help so
+	// an LLM child sees the whole surface, not just half of it.
+	wantSubcommands := []string{
+		"slackrun post", "slackrun react", "slackrun upload",
+		"slackrun history", "slackrun replies", "slackrun reactions",
+		"slackrun user", "slackrun usergroups",
 	}
-	if !strings.Contains(out, "slackrun react") || !strings.Contains(out, "slackrun upload") {
-		t.Errorf("expected all three subcommands in injected help: %q", out)
+	for _, want := range wantSubcommands {
+		if !strings.Contains(out, want) {
+			t.Errorf("injected help missing %q:\n%s", want, out)
+		}
 	}
 }
 
