@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -689,6 +691,73 @@ rules:
 	}
 	if !res.Rules[0].Action.ReplyWithStdoutEnabled() {
 		t.Error("ReplyWithStdoutEnabled should default to true")
+	}
+}
+
+func TestExpandHomeInCwd(t *testing.T) {
+	t.Setenv("HOME", "/home/tester")
+	cases := []struct {
+		in, want string
+		wantErr  bool
+	}{
+		{"", "", false},
+		{"/abs/path", "/abs/path", false},
+		{"relative/path", "relative/path", false},
+		{"~", "/home/tester", false},
+		{"~/dev/x", "/home/tester/dev/x", false},
+		{"~alice/x", "", true},
+	}
+	for _, c := range cases {
+		got, err := expandHomeInCwd(c.in)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("expandHomeInCwd(%q): want error, got %q", c.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("expandHomeInCwd(%q): unexpected error %v", c.in, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("expandHomeInCwd(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestLoadRulesFile_ExpandsHomeInCwd(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	// The expanded cwd has to exist because ValidateRules stats it (we do not
+	// pass SkipFsChecks via LoadRulesFile).
+	if err := os.MkdirAll(filepath.Join(fakeHome, "wsp"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: ~/wsp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: "hi"
+`
+	path := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	res, err := LoadRulesFile(path, CheckOptions{})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if res.HasErrors() {
+		t.Fatalf("unexpected issues: %+v", res.Issues)
+	}
+	want := filepath.Join(fakeHome, "wsp")
+	if got := res.Rules[0].Action.Cwd; got != want {
+		t.Errorf("cwd expanded to %q, want %q", got, want)
 	}
 }
 

@@ -437,8 +437,35 @@ func LoadRulesFile(path string, opts CheckOptions) (ValidationResult, error) {
 	if err != nil {
 		return ValidationResult{}, err
 	}
+	for i := range parsed.Rules {
+		expanded, err := expandHomeInCwd(parsed.Rules[i].Action.Cwd)
+		if err != nil {
+			return ValidationResult{}, fmt.Errorf("rule %q action.cwd: %w", parsed.Rules[i].Name, err)
+		}
+		parsed.Rules[i].Action.Cwd = expanded
+	}
 	issues := ValidateRules(parsed.Rules, opts)
 	return ValidationResult{Rules: parsed.Rules, Issues: issues}, nil
+}
+
+// expandHomeInCwd resolves a leading "~" / "~/" against $HOME. `~user` is
+// rejected: crossing home dirs from a rules file would be surprising, and
+// the cross-platform lookup would drag in os/user.
+func expandHomeInCwd(cwd string) (string, error) {
+	if cwd == "" || !strings.HasPrefix(cwd, "~") {
+		return cwd, nil
+	}
+	if cwd != "~" && !strings.HasPrefix(cwd, "~/") {
+		return cwd, fmt.Errorf("`~user` prefix is not supported (got %q); use an absolute path or `~/…`", cwd)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return cwd, fmt.Errorf("resolve $HOME: %w", err)
+	}
+	if cwd == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, cwd[2:]), nil
 }
 
 // ValidateRules runs the semantic checks on top of schema parsing. Returns a

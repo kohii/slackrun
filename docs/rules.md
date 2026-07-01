@@ -21,7 +21,7 @@ rules:
       # — app_mention —
       keyword: <single token>     # optional; absent → default rule (max 1)
     action:                       # required
-      cwd: /abs/path              # absolute paths only
+      cwd: /abs/path              # absolute path, or ~/xxx (expanded against $HOME)
       command: ["program", "arg"] # argv (no shell). NO `{{var}}` allowed here.
       timeout_ms: 600000          # required (milliseconds)
       env: { KEY: value }         # optional, extra env for the spawned process
