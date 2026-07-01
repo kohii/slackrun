@@ -310,7 +310,7 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 
 	nonce := generateNonce()
 	timeout := time.Duration(rule.Action.TimeoutMs) * time.Millisecond
-	stdinPayload := buildStdinPayload(stdinBuildInput{
+	stdinPayload := BuildStdinPayload(StdinBuildInput{
 		Parts:      rule.Action.Stdin,
 		Vars:       vars,
 		Event:      ev,
@@ -458,6 +458,41 @@ func ruleSummaries(rules []config.Rule) []map[string]any {
 		})
 	}
 	return out
+}
+
+// IncomingEventFromMessage adapts a plain slack.Message (as returned by
+// conversations.history / conversations.replies) to our dispatcher input.
+// Used by tools that construct an event from an API fetch rather than from a
+// Socket Mode envelope (e.g. `slackrun replay`). Fields mirror what fromMessage
+// extracts from the socket-mode wrapper.
+func IncomingEventFromMessage(m slack.Message, channel string) dispatch.IncomingEvent {
+	ev := dispatch.IncomingEvent{
+		Type:        "message",
+		Subtype:     m.SubType,
+		Channel:     channel,
+		User:        m.User,
+		BotID:       m.BotID,
+		Username:    m.Username,
+		TS:          m.Timestamp,
+		ThreadTS:    m.ThreadTimestamp,
+		Text:        m.Text,
+		Attachments: convertAttachments(m.Attachments),
+		Blocks:      convertBlocks(m.Blocks),
+		Files:       convertFiles(m.Files),
+	}
+	if m.BotProfile != nil {
+		ev.BotProfileName = m.BotProfile.Name
+		if ev.AppID == "" {
+			ev.AppID = m.BotProfile.AppID
+		}
+	}
+	// Bot posts from conversations.history sometimes arrive with subtype
+	// empty even though they carry BotID — the socket-mode path sees
+	// subtype=bot_message. Normalize so matchMessage's allow-list still hits.
+	if ev.Subtype == "" && (ev.BotID != "" || ev.BotProfileName != "") {
+		ev.Subtype = "bot_message"
+	}
+	return ev
 }
 
 // fromAppMention adapts slack-go's AppMentionEvent to our dispatcher input.
@@ -652,9 +687,9 @@ func threadFetchPolicy(parts []config.StdinPart) config.OnFetchErrorPolicy {
 	return config.OnFetchErrorFail
 }
 
-// stdinBuildInput packs everything buildStdinPayload needs. Wrapped in a
+// StdinBuildInput packs everything BuildStdinPayload needs. Wrapped in a
 // struct so tests can pin individual fields without long positional argv.
-type stdinBuildInput struct {
+type StdinBuildInput struct {
 	Parts      []config.StdinPart
 	Vars       dispatch.TemplateVars
 	Event      dispatch.IncomingEvent
@@ -665,12 +700,12 @@ type stdinBuildInput struct {
 	SelfBotID  string
 }
 
-// buildStdinPayload concatenates the rule's stdin parts into a single byte
+// BuildStdinPayload concatenates the rule's stdin parts into a single byte
 // stream suitable for piping to the child. Slack-derived parts that resolve
 // to empty (e.g. a thread part on a standalone mention with
 // IncludeTriggeringMessage:false) contribute nothing — their `heading:`
 // disappears with them.
-func buildStdinPayload(in stdinBuildInput) string {
+func BuildStdinPayload(in StdinBuildInput) string {
 	var sb strings.Builder
 	for _, p := range in.Parts {
 		switch p.Kind {

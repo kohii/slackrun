@@ -53,6 +53,11 @@ type Options struct {
 	// goroutine. nil leaves stdin pointing at /dev/null (the OS default for
 	// an unset Cmd.Stdin).
 	Stdin io.Reader
+	// Stdout / Stderr, when non-nil, receive a tee of the child's output. The
+	// captured Result.Stdout / Result.Stderr strings are still populated so
+	// callers that need both live streaming and post-hoc inspection get both.
+	Stdout io.Writer
+	Stderr io.Writer
 }
 
 // Handle exposes the running job. Done fires exactly once with the final
@@ -93,8 +98,16 @@ func Run(opts Options) Handle {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	if opts.Stdout != nil {
+		cmd.Stdout = io.MultiWriter(&stdout, opts.Stdout)
+	} else {
+		cmd.Stdout = &stdout
+	}
+	if opts.Stderr != nil {
+		cmd.Stderr = io.MultiWriter(&stderr, opts.Stderr)
+	} else {
+		cmd.Stderr = &stderr
+	}
 	if opts.Stdin != nil {
 		cmd.Stdin = opts.Stdin
 	}

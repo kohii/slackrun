@@ -396,6 +396,30 @@ Prints a JSON report with the match kind (`matched` / `skip` / `unauthorized`
 / `no-match`), the resolved command argv, cwd, and the rendered stdin
 preview. Spawns nothing. Useful for confirming a new rule before reloading.
 
+## Replay
+
+Fetch a specific past Slack message via the API and run it through the same
+pipeline the daemon uses — including spawning the matched rule's command
+locally. Nothing is posted back to Slack unless you opt in.
+
+```sh
+slackrun replay ~/.config/slackrun/rules.yaml \
+  --permalink https://<workspace>.slack.com/archives/CXXX/pTTTTTTTTTTTTT
+```
+
+Safety defaults: `SLACKRUN_*` env is dummy, `SLACK_BOT_TOKEN` is stripped
+from the child, and the parent posts no progress / done messages. Opt in
+per layer as fidelity increases:
+
+- `--dry-stdin` — skip spawn, just print rendered stdin + env
+- (default) — spawn but keep the child sandboxed from Slack writes
+- `--real-slack-context` — child sees the real channel / ts
+- `--expose-token` — child gets `SLACK_BOT_TOKEN` (requires `--real-slack-context`)
+- `--allow-slack-side-effects` — parent behaves like the daemon (progress msg, ✅Done, react)
+
+Exit codes: `0` child success, `1` child failure or internal error, `2`
+usage, `3` no rule matched, `4` message fetch failed.
+
 ## Hot reload
 
 Not implemented. Restart instead:

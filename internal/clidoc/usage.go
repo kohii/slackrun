@@ -50,6 +50,7 @@ Dispatch:
   slackrun start [<rules.yaml>]                 Run the bot
   slackrun check <rules.yaml>                   Validate the rules file
   slackrun dry-run <rules.yaml> --event <file>  Show what would match (no spawn)
+  slackrun replay <rules.yaml> --permalink URL  Replay one past message through the pipeline
 
 ` + ChildUsage + `
 Misc:

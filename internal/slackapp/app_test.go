@@ -76,7 +76,7 @@ func TestBuildStdinPayload_ConcatsPartsInOrder(t *testing.T) {
 		{Kind: config.PartKindText, Text: "\nOUTRO"},
 	}
 	thread := []slackthread.Message{{TS: "1", Source: slackthread.SourceUser, User: "U1", Text: "hi"}}
-	out := buildStdinPayload(stdinBuildInput{Parts: parts, Thread: thread})
+	out := BuildStdinPayload(StdinBuildInput{Parts: parts, Thread: thread})
 	if !strings.HasPrefix(out, "INTRO\n") {
 		t.Errorf("missing INTRO prefix: %q", out)
 	}
@@ -93,7 +93,7 @@ func TestBuildStdinPayload_ExpandsMetadataVars(t *testing.T) {
 	parts := []config.StdinPart{
 		{Kind: config.PartKindText, Text: "user={{event.user_id}} channel={{event.channel_id}}"},
 	}
-	out := buildStdinPayload(stdinBuildInput{
+	out := BuildStdinPayload(StdinBuildInput{
 		Parts: parts,
 		Vars:  dispatch.TemplateVars{UserID: "U1", ChannelID: "C9"},
 	})
@@ -115,7 +115,7 @@ func TestBuildStdinPayload_ThreadStandaloneMention_PartVanishes(t *testing.T) {
 		}},
 	}
 	thread := []slackthread.Message{{TS: "1.0", Source: slackthread.SourceUser, User: "U1", Text: "hi"}}
-	out := buildStdinPayload(stdinBuildInput{
+	out := BuildStdinPayload(StdinBuildInput{
 		Parts:  parts,
 		Event:  dispatch.IncomingEvent{TS: "1.0"},
 		Thread: thread,
@@ -144,7 +144,7 @@ func TestBuildStdinPayload_ThreadInThread_DropsTriggerByDefault(t *testing.T) {
 	}
 	ev := dispatch.IncomingEvent{Type: "app_mention", TS: "1003", User: "U1", Text: "trigger"}
 	res := dispatch.MatchResult{Text: "trigger", Rest: "trigger"}
-	out := buildStdinPayload(stdinBuildInput{Parts: parts, Event: ev, Match: res, Thread: thread, Nonce: "TEST"})
+	out := BuildStdinPayload(StdinBuildInput{Parts: parts, Event: ev, Match: res, Thread: thread, Nonce: "TEST"})
 	if !strings.Contains(out, "UNTRUSTED_SLACK_MESSAGE_TEST") {
 		t.Errorf("trigger_message wrapper missing: %q", out)
 	}
@@ -178,7 +178,7 @@ func TestBuildStdinPayload_TriggerMessage_AlwaysRenders(t *testing.T) {
 	}
 	ev := dispatch.IncomingEvent{Type: "app_mention", TS: "1.0", User: "U1", Text: "<@UBOT> hello there"}
 	res := dispatch.MatchResult{Text: "hello there", Rest: "there"} // mention stripped; "hello" is first token
-	out := buildStdinPayload(stdinBuildInput{Parts: parts, Event: ev, Match: res, Nonce: "ZZZ"})
+	out := BuildStdinPayload(StdinBuildInput{Parts: parts, Event: ev, Match: res, Nonce: "ZZZ"})
 	if !strings.Contains(out, "最新の依頼") {
 		t.Errorf("heading missing: %q", out)
 	}
@@ -197,7 +197,7 @@ func TestBuildStdinPayload_TriggerMessage_DefaultModeForDefaultRule(t *testing.T
 	ev := dispatch.IncomingEvent{Type: "app_mention", TS: "1.0", User: "U1"}
 	rule := &config.Rule{Trigger: config.Trigger{Type: config.TriggerTypeAppMention}} // Keyword: nil → default rule
 	res := dispatch.MatchResult{Rule: rule, Text: "hello there", Rest: "there"}
-	out := buildStdinPayload(stdinBuildInput{Parts: parts, Event: ev, Match: res})
+	out := BuildStdinPayload(StdinBuildInput{Parts: parts, Event: ev, Match: res})
 	if !strings.Contains(out, "hello there") {
 		t.Errorf("expected full mention-stripped text for default rule, got: %q", out)
 	}
@@ -324,7 +324,7 @@ func TestBuildStdinPayload_SlackrunHelpInjectsChildUsage(t *testing.T) {
 		{Kind: config.PartKindText, Text: "Lead:\n"},
 		{Kind: config.PartKindSlackrunHelp, SlackrunHelp: &config.SlackrunHelpSpec{}},
 	}
-	out := buildStdinPayload(stdinBuildInput{Parts: parts})
+	out := BuildStdinPayload(StdinBuildInput{Parts: parts})
 	if !strings.HasPrefix(out, "Lead:\n") {
 		t.Errorf("missing text prefix: %q", out)
 	}

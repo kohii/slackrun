@@ -27,6 +27,8 @@ func main() {
 		os.Exit(cli.RunCheck(os.Args[2:], os.Stdout, os.Stderr))
 	case "dry-run":
 		os.Exit(cli.RunDryRun(os.Args[2:], os.Stdout, os.Stderr))
+	case "replay":
+		os.Exit(cli.RunReplay(os.Args[2:], os.Stdout, os.Stderr))
 	case "post":
 		os.Exit(cli.RunPost(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 	case "react":
