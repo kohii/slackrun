@@ -305,6 +305,7 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		UserID:    ev.User,
 		TS:        ev.TS,
 		ThreadTS:  ev.ThreadTS,
+		Extract:   res.Extract,
 	}
 
 	nonce := generateNonce()

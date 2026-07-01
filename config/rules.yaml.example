@@ -49,6 +49,11 @@ rules:
         usernames: ["Sentry"]
       match_thread_replies: false         # skip Sentry follow-ups inside an
                                           # existing incident thread (double-fire)
+      extract:                            # pull the Sentry issue URL out of the
+        sentry_url:                       # noisy notification body → available
+          pattern: 'https?://[^\s|<>]*\.sentry\.io/issues/\d+[^\s|<>]*'
+          required: true                  # as {{extract.sentry_url}}
+
     action:
       cwd: /path/to/your/workspace        # replace with an absolute path
       command: [claude, -p]               # reads prompt from stdin

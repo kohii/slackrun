@@ -112,6 +112,10 @@ type MatchResult struct {
 	FirstToken string // first non-mention token; empty if none
 	Rest       string // text minus the first token (for keyword-based dispatch)
 	Reason     string // populated for Skip / Unauthorized
+	// Extract holds the first substring match for each declared extractor on
+	// the matched rule. Absent keys mean the extractor missed. `Required`
+	// extractors that miss force the rule off (see runExtractors).
+	Extract map[string]string
 }
 
 var allowedMessageSubtypes = map[string]bool{
@@ -229,9 +233,14 @@ func Match(ev IncomingEvent, rules []config.Rule, ctx MatcherContext) MatchResul
 			if r.Trigger.Type != config.TriggerTypeAppMention {
 				continue
 			}
-			if matchMention(r, firstToken) {
-				return MatchResult{Kind: MatchKindMatched, Rule: r, Text: text, FirstToken: firstToken, Rest: rest}
+			if !matchMention(r, firstToken) {
+				continue
 			}
+			extract, ok := runExtractors(ev, r)
+			if !ok {
+				continue
+			}
+			return MatchResult{Kind: MatchKindMatched, Rule: r, Text: text, FirstToken: firstToken, Rest: rest, Extract: extract}
 		}
 		return MatchResult{Kind: MatchKindNoMatch, Text: text, FirstToken: firstToken}
 	}
@@ -241,11 +250,50 @@ func Match(ev IncomingEvent, rules []config.Rule, ctx MatcherContext) MatchResul
 		if r.Trigger.Type != config.TriggerTypeMessage {
 			continue
 		}
-		if matchMessage(ev, userID, r) {
-			return MatchResult{Kind: MatchKindMatched, Rule: r, Text: rawText}
+		if !matchMessage(ev, userID, r) {
+			continue
 		}
+		extract, ok := runExtractors(ev, r)
+		if !ok {
+			continue
+		}
+		return MatchResult{Kind: MatchKindMatched, Rule: r, Text: rawText, Extract: extract}
 	}
 	return MatchResult{Kind: MatchKindNoMatch, Text: rawText}
+}
+
+// runExtractors evaluates the rule's declared extractors against the raw
+// message body (text field + flattened blocks/attachments). Returns the
+// captured values plus a boolean: false when any `required: true` extractor
+// missed, in which case the caller should skip the rule.
+func runExtractors(ev IncomingEvent, r *config.Rule) (map[string]string, bool) {
+	if len(r.Trigger.Extract) == 0 {
+		return nil, true
+	}
+	body := ExtractText(ev)
+	if flat := flattenBody(ev); flat != "" {
+		if body != "" {
+			body += "\n\n"
+		}
+		body += flat
+	}
+	out := make(map[string]string, len(r.Trigger.Extract))
+	for name, spec := range r.Trigger.Extract {
+		re := r.Trigger.CompiledExtract(name)
+		if re == nil {
+			// Compilation was rejected at load time; treat as missing.
+			if spec.Required {
+				return nil, false
+			}
+			continue
+		}
+		if m := re.FindString(body); m != "" {
+			out[name] = m
+		} else if spec.Required {
+			return nil, false
+		}
+	}
+	return out, true
 }
 
 func matchMention(r *config.Rule, firstToken string) bool {

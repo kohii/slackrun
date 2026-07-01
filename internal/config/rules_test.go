@@ -745,6 +745,114 @@ rules:
 	}
 }
 
+func TestTrigger_ExtractPatternCompiles(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01ALERT123
+      from: { usernames: ["Sentry"] }
+      extract:
+        sentry_url:
+          pattern: 'https?://[^\s|<>]*\.sentry\.io/issues/\d+'
+          required: true
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: "url: {{extract.sentry_url}}"
+`
+	parsed, err := ParseRulesYAML([]byte(src), "<test>")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	issues := ValidateRules(parsed.Rules, CheckOptions{SkipFsChecks: true})
+	for _, is := range issues {
+		if is.Level == IssueError {
+			t.Errorf("unexpected error: %s", is.Message)
+		}
+	}
+	compileExtractors(&parsed.Rules[0])
+	if parsed.Rules[0].Trigger.CompiledExtract("sentry_url") == nil {
+		t.Error("expected compiled sentry_url regex")
+	}
+}
+
+func TestTrigger_ExtractBadPattern(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01ALERT123
+      from: { usernames: ["Sentry"] }
+      extract:
+        broken:
+          pattern: '['
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: hi
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "does not compile") {
+		t.Fatalf("expected compile error, got %+v", res.Issues)
+	}
+}
+
+func TestTrigger_ExtractRejectsBadName(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01ALERT123
+      from: { usernames: ["Sentry"] }
+      extract:
+        BadName:
+          pattern: '.'
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: hi
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "[a-z_]") {
+		t.Fatalf("expected name error, got %+v", res.Issues)
+	}
+}
+
+func TestTrigger_ExtractUnknownVarInText(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger:
+      type: message
+      channel: C01ALERT123
+      from: { usernames: ["Sentry"] }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      stdin:
+        - text: "url: {{extract.sentry_url}}"
+`
+	res := parseAndValidate(t, src)
+	if !hasIssue(res.Issues, "trigger.extract has no such entry") {
+		t.Fatalf("expected undeclared-extract error, got %+v", res.Issues)
+	}
+}
+
 func TestTrigger_MatchThreadRepliesRejectedOnMention(t *testing.T) {
 	t.Parallel()
 	src := `

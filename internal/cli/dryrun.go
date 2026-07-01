@@ -133,6 +133,10 @@ func RunDryRun(args []string, stdout, stderr io.Writer) int {
 			UserID:    dispEv.User,
 			TS:        dispEv.TS,
 			ThreadTS:  dispEv.ThreadTS,
+			Extract:   res.Extract,
+		}
+		if len(res.Extract) > 0 {
+			report["extract"] = res.Extract
 		}
 		report["rule"] = res.Rule.Name
 		report["cwd"] = res.Rule.Action.Cwd

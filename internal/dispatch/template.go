@@ -2,7 +2,10 @@
 // stdin payload that will be piped to the spawned command.
 package dispatch
 
-import "regexp"
+import (
+	"regexp"
+	"strings"
+)
 
 // TemplateVars captures the metadata variables a `text:` stdin part can
 // reference. These are all opaque identifiers or URLs derived from the
@@ -15,20 +18,28 @@ type TemplateVars struct {
 	UserID    string
 	TS        string
 	ThreadTS  string
+	// Extract holds the values captured by rule.trigger.extract, keyed by
+	// extractor name. Empty for names that missed (and non-required).
+	Extract map[string]string
 }
 
-var templateVarRe = regexp.MustCompile(`\{\{\s*(event\.permalink|event\.channel_id|event\.user_id|event\.ts|event\.thread_ts)\s*\}\}`)
+// templateVarRe matches `{{event.*}}` and `{{extract.<name>}}` placeholders.
+// The extract name portion is restricted to config.extractNameRe's character
+// class so a stray `{{extract.foo bar}}` does not creep through.
+var templateVarRe = regexp.MustCompile(`\{\{\s*(event\.permalink|event\.channel_id|event\.user_id|event\.ts|event\.thread_ts|extract\.[a-z_][a-z0-9_]*)\s*\}\}`)
 
-// ExpandTemplate replaces `{{event.*}}` placeholders. Unknown names are
-// left untouched; the config loader rejects them at load time so reaching
-// ExpandTemplate with one means the loader was bypassed (e.g. tests).
+// ExpandTemplate replaces `{{event.*}}` and `{{extract.*}}` placeholders.
+// Unknown names are left untouched; the config loader rejects them at load
+// time so reaching ExpandTemplate with one means the loader was bypassed
+// (e.g. tests).
 func ExpandTemplate(template string, vars TemplateVars) string {
 	return templateVarRe.ReplaceAllStringFunc(template, func(match string) string {
 		groups := templateVarRe.FindStringSubmatch(match)
 		if len(groups) < 2 {
 			return match
 		}
-		switch groups[1] {
+		name := groups[1]
+		switch name {
 		case "event.permalink":
 			return vars.Permalink
 		case "event.channel_id":
@@ -39,6 +50,9 @@ func ExpandTemplate(template string, vars TemplateVars) string {
 			return vars.TS
 		case "event.thread_ts":
 			return vars.ThreadTS
+		}
+		if strings.HasPrefix(name, "extract.") {
+			return vars.Extract[strings.TrimPrefix(name, "extract.")]
 		}
 		return match
 	})

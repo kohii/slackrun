@@ -129,6 +129,79 @@ func TestMatch_MessageByUsernameCaseInsensitive(t *testing.T) {
 	}
 }
 
+func TestMatch_ExtractCapturesURL(t *testing.T) {
+	t.Parallel()
+	rule := newRule("sentry", config.Trigger{
+		Type:    config.TriggerTypeMessage,
+		Channel: "C01ALERT",
+		From:    &config.TriggerFrom{Usernames: []string{"Sentry"}},
+		Extract: map[string]config.ExtractSpec{
+			"sentry_url": {Pattern: `https?://[^\s|<>]*\.sentry\.io/issues/\d+[^\s|<>]*`, Required: true},
+		},
+	})
+	// Simulate what LoadRulesFile does after ValidateRules.
+	config.CompileForTest(&rule)
+	ev := IncomingEvent{
+		Type: "message", Subtype: "bot_message",
+		Channel: "C01ALERT", BotProfileName: "Sentry",
+		Text: "note: <https://bw-company.sentry.io/issues/7585739905/?x=1|IllegalArgumentException>",
+	}
+	res := Match(ev, []config.Rule{rule}, MatcherContext{})
+	if res.Kind != MatchKindMatched {
+		t.Fatalf("expected match, got %+v", res)
+	}
+	if got, want := res.Extract["sentry_url"], "https://bw-company.sentry.io/issues/7585739905/?x=1"; got != want {
+		t.Errorf("sentry_url = %q, want %q", got, want)
+	}
+}
+
+func TestMatch_ExtractRequiredMissDropsRule(t *testing.T) {
+	t.Parallel()
+	rule := newRule("sentry", config.Trigger{
+		Type:    config.TriggerTypeMessage,
+		Channel: "C01ALERT",
+		From:    &config.TriggerFrom{Usernames: []string{"Sentry"}},
+		Extract: map[string]config.ExtractSpec{
+			"sentry_url": {Pattern: `\.sentry\.io/issues/\d+`, Required: true},
+		},
+	})
+	config.CompileForTest(&rule)
+	ev := IncomingEvent{
+		Type: "message", Subtype: "bot_message",
+		Channel: "C01ALERT", BotProfileName: "Sentry",
+		Text: "an unrelated bot message with no sentry link",
+	}
+	res := Match(ev, []config.Rule{rule}, MatcherContext{})
+	if res.Kind == MatchKindMatched {
+		t.Fatalf("expected non-match on required extract miss, got %+v", res)
+	}
+}
+
+func TestMatch_ExtractOptionalMissLeavesEmpty(t *testing.T) {
+	t.Parallel()
+	rule := newRule("sentry", config.Trigger{
+		Type:    config.TriggerTypeMessage,
+		Channel: "C01ALERT",
+		From:    &config.TriggerFrom{Usernames: []string{"Sentry"}},
+		Extract: map[string]config.ExtractSpec{
+			"sentry_url": {Pattern: `\.sentry\.io/issues/\d+`},
+		},
+	})
+	config.CompileForTest(&rule)
+	ev := IncomingEvent{
+		Type: "message", Subtype: "bot_message",
+		Channel: "C01ALERT", BotProfileName: "Sentry",
+		Text: "an unrelated bot message",
+	}
+	res := Match(ev, []config.Rule{rule}, MatcherContext{})
+	if res.Kind != MatchKindMatched {
+		t.Fatalf("expected match on optional extract miss, got %+v", res)
+	}
+	if _, present := res.Extract["sentry_url"]; present {
+		t.Errorf("expected sentry_url absent on miss, got %q", res.Extract["sentry_url"])
+	}
+}
+
 func TestMatch_MessageSkipsThreadReply(t *testing.T) {
 	t.Parallel()
 	falseVal := false

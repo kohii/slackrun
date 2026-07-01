@@ -20,6 +20,11 @@ rules:
         usernames: [SomeName]
       match_thread_replies: true  # optional, default true; false to skip
                                   # replies posted inside an existing thread
+      # — both variants —
+      extract:                    # optional; named regex captures over the
+        sentry_url:               # message body. Exposed as {{extract.<name>}}
+          pattern: 'https?://…'   # in `text:` parts.
+          required: true          # optional; miss → rule non-match (skipped)
       # — app_mention —
       keyword: <single token>     # optional; absent → default rule (max 1)
     action:                       # required
@@ -65,6 +70,14 @@ coordinates so the child can call the read/write subcommands (`slackrun
   posts and thread parents (`thread_ts` empty or equal to `ts`); replies
   inside an existing thread are skipped. Useful when a bot posts follow-ups
   into an existing incident thread and you only want to react to the root.
+- `trigger.extract` declares named regex captures over the message body
+  (event `text` + flattened blocks/attachments). The first substring match
+  per name is exposed as `{{extract.<name>}}` inside `text:` parts. Names
+  must match `[a-z_][a-z0-9_]*`. `required: true` on an extractor turns a
+  miss into a non-match — the rule silently declines and the dispatcher
+  tries the next one. Handy for pulling a Sentry / PagerDuty / GitHub link
+  out of a webhook post so the child gets just the ID / URL, not the whole
+  noisy notification body.
 
 `trigger.from.usernames` is the weakest signal — any incoming webhook can pick
 its own display name. Prefer `bot_user_ids` or `app_ids` when possible.

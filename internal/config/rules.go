@@ -51,6 +51,30 @@ type Trigger struct {
 	// app_mention variant. nil means "default rule" (matches when no other
 	// keyword rule matched); at most one such rule may exist per file.
 	Keyword *string `yaml:"keyword,omitempty"`
+
+	// Extract declares named regex captures over the message body. The first
+	// substring match per name is exposed to `text:` parts as
+	// `{{extract.<name>}}`. A `required: true` extractor that finds no match
+	// makes the rule non-match on that event (silently skipped, next rule
+	// tried). Available for both message and app_mention triggers.
+	Extract map[string]ExtractSpec `yaml:"extract,omitempty"`
+
+	// extractRE holds the compiled Extract patterns, populated by
+	// LoadRulesFile after ValidateRules. Unexported so YAML never sees it.
+	extractRE map[string]*regexp.Regexp
+}
+
+// ExtractSpec is one named regex extractor. The regex uses Go's syntax
+// (regexp/syntax). The first substring match becomes the value.
+type ExtractSpec struct {
+	Pattern  string `yaml:"pattern"`
+	Required bool   `yaml:"required,omitempty"`
+}
+
+// CompiledExtract returns the compiled regex for a declared extractor. nil
+// means no such extractor is declared (or compilation was skipped).
+func (t Trigger) CompiledExtract(name string) *regexp.Regexp {
+	return t.extractRE[name]
 }
 
 // AllowsThreadReplies reports whether the trigger accepts messages posted
@@ -63,11 +87,12 @@ func (t Trigger) AllowsThreadReplies() bool {
 // rawTrigger is the strict-decode shadow type — we parse into it first so we
 // can reject unexpected fields, then fold the result into Trigger.
 type rawTrigger struct {
-	Type               string       `yaml:"type"`
-	Channel            string       `yaml:"channel,omitempty"`
-	From               *TriggerFrom `yaml:"from,omitempty"`
-	MatchThreadReplies *bool        `yaml:"match_thread_replies,omitempty"`
-	Keyword            *string      `yaml:"keyword,omitempty"`
+	Type               string                 `yaml:"type"`
+	Channel            string                 `yaml:"channel,omitempty"`
+	From               *TriggerFrom           `yaml:"from,omitempty"`
+	MatchThreadReplies *bool                  `yaml:"match_thread_replies,omitempty"`
+	Keyword            *string                `yaml:"keyword,omitempty"`
+	Extract            map[string]ExtractSpec `yaml:"extract,omitempty"`
 }
 
 // UnmarshalYAML enforces the discriminated-union shape.
@@ -103,6 +128,7 @@ func (t *Trigger) UnmarshalYAML(node *yaml.Node) error {
 	default:
 		return fmt.Errorf("trigger.type must be \"message\" or \"app_mention\" (got %q)", raw.Type)
 	}
+	t.Extract = raw.Extract
 	return nil
 }
 
@@ -362,11 +388,12 @@ type CheckOptions struct {
 }
 
 var (
-	nameRe       = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
-	channelIDRe  = regexp.MustCompile(`^[CG][A-Z0-9]{2,}$`)
-	botUserIDRe  = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
-	appIDRe      = regexp.MustCompile(`^A[A-Z0-9]{2,}$`)
-	envVarNameRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	nameRe        = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+	channelIDRe   = regexp.MustCompile(`^[CG][A-Z0-9]{2,}$`)
+	botUserIDRe   = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
+	appIDRe       = regexp.MustCompile(`^A[A-Z0-9]{2,}$`)
+	envVarNameRe  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+	extractNameRe = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 	// anyTemplateRe matches any `{{name}}` token in a config string. Kept
 	// independent of the dispatch package's recognized-name regex so the
@@ -462,7 +489,37 @@ func LoadRulesFile(path string, opts CheckOptions) (ValidationResult, error) {
 		parsed.Rules[i].Action.Cwd = expanded
 	}
 	issues := ValidateRules(parsed.Rules, opts)
+	// Compile extract patterns for rules that validated cleanly. Skipping
+	// broken rules here avoids double-reporting a bad pattern (validateExtract
+	// already surfaced the compile error as an issue).
+	for i := range parsed.Rules {
+		compileExtractors(&parsed.Rules[i])
+	}
 	return ValidationResult{Rules: parsed.Rules, Issues: issues}, nil
+}
+
+// CompileForTest is a test-only helper that runs compileExtractors so tests
+// in other packages can hand-build a Rule literal and then exercise the
+// matcher's extract path without going through LoadRulesFile.
+func CompileForTest(r *Rule) {
+	compileExtractors(r)
+}
+
+func compileExtractors(r *Rule) {
+	if len(r.Trigger.Extract) == 0 {
+		return
+	}
+	compiled := make(map[string]*regexp.Regexp, len(r.Trigger.Extract))
+	for name, spec := range r.Trigger.Extract {
+		re, err := regexp.Compile(spec.Pattern)
+		if err != nil {
+			// validateExtract already flagged this; skip silently so callers
+			// see one error, not two.
+			continue
+		}
+		compiled[name] = re
+	}
+	r.Trigger.extractRE = compiled
 }
 
 // expandHomeInCwd resolves a leading "~" / "~/" against $HOME. `~user` is
@@ -618,8 +675,9 @@ func validateRule(r Rule) []ValidationIssue {
 	if r.Action.TimeoutMs <= 0 {
 		add(IssueError, fmt.Sprintf("action.timeout_ms must be > 0 (got %d)", r.Action.TimeoutMs))
 	}
+	validateExtract(r.Trigger.Extract, add)
 	if r.Action.Stdin != nil {
-		validateStdin(r.Action.Stdin, r.Action.ExposeSlackToken, add)
+		validateStdin(r.Action.Stdin, r.Action.ExposeSlackToken, r.Trigger.Extract, add)
 	}
 	for k := range r.Action.Env {
 		if !envVarNameRe.MatchString(k) {
@@ -673,7 +731,7 @@ func validateRule(r Rule) []ValidationIssue {
 // exposeSlackToken is the rule's flag so we can warn when `slackrun_help`
 // is included without the token forwarding that makes the documented
 // subcommands actually usable.
-func validateStdin(parts []StdinPart, exposeSlackToken bool, add func(ValidationIssueLevel, string)) {
+func validateStdin(parts []StdinPart, exposeSlackToken bool, extract map[string]ExtractSpec, add func(ValidationIssueLevel, string)) {
 	if len(parts) == 0 {
 		add(IssueError, "action.stdin must contain at least one part")
 		return
@@ -685,7 +743,7 @@ func validateStdin(parts []StdinPart, exposeSlackToken bool, add func(Validation
 		prefix := fmt.Sprintf("action.stdin[%d]", i)
 		switch p.Kind {
 		case PartKindText:
-			validateTextPart(p.Text, prefix, add)
+			validateTextPart(p.Text, prefix, extract, add)
 		case PartKindTriggerMessage:
 			triggerMessageCount++
 			validateTriggerMessagePart(p.TriggerMessage, prefix, add)
@@ -712,10 +770,18 @@ func validateStdin(parts []StdinPart, exposeSlackToken bool, add func(Validation
 	}
 }
 
-func validateTextPart(text, prefix string, add func(ValidationIssueLevel, string)) {
+func validateTextPart(text, prefix string, extract map[string]ExtractSpec, add func(ValidationIssueLevel, string)) {
 	for _, m := range anyTemplateRe.FindAllStringSubmatch(text, -1) {
 		name := m[1]
 		if _, ok := knownTemplateVarsInRules[name]; ok {
+			continue
+		}
+		if strings.HasPrefix(name, "extract.") {
+			key := strings.TrimPrefix(name, "extract.")
+			if _, ok := extract[key]; ok {
+				continue
+			}
+			add(IssueError, fmt.Sprintf("%s.text references {{%s}} but trigger.extract has no such entry", prefix, name))
 			continue
 		}
 		if hint, ok := legacyVarHints[name]; ok {
@@ -723,6 +789,22 @@ func validateTextPart(text, prefix string, add func(ValidationIssueLevel, string
 			continue
 		}
 		add(IssueError, fmt.Sprintf("%s.text references unknown variable {{%s}}", prefix, name))
+	}
+}
+
+func validateExtract(extract map[string]ExtractSpec, add func(ValidationIssueLevel, string)) {
+	for name, spec := range extract {
+		prefix := fmt.Sprintf("trigger.extract[%q]", name)
+		if !extractNameRe.MatchString(name) {
+			add(IssueError, prefix+" name must match [a-z_][a-z0-9_]*")
+		}
+		if strings.TrimSpace(spec.Pattern) == "" {
+			add(IssueError, prefix+".pattern is required")
+			continue
+		}
+		if _, err := regexp.Compile(spec.Pattern); err != nil {
+			add(IssueError, fmt.Sprintf("%s.pattern does not compile: %v", prefix, err))
+		}
 	}
 }
 
