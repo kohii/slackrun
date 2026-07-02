@@ -288,9 +288,15 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		}
 	}
 
-	progress, err := StartProgress(ctx, a.api, ev.Channel, threadTS)
+	var progress ProgressHandle
+	var err error
+	if rule.Action.ProgressStyleResolved() == config.ProgressStyleAssistantStatus {
+		progress, err = StartAssistantStatusProgress(ctx, a.api, a.api, ev.Channel, threadTS)
+	} else {
+		progress, err = StartMessageProgress(ctx, a.api, ev.Channel, threadTS)
+	}
 	if err != nil {
-		logging.Error("failed to start progress message", logging.F("error", err), logging.F("rule", rule.Name))
+		logging.Error("failed to start progress indicator", logging.F("error", err), logging.F("rule", rule.Name))
 		return
 	}
 

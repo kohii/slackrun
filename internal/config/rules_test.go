@@ -914,6 +914,71 @@ rules:
 	}
 }
 
+func TestValidate_ProgressStyleAccepted(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"message", "assistant_status"} {
+		value := value
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      progress_style: ` + value + `
+`
+			res := parseAndValidate(t, src)
+			if res.HasErrors() {
+				t.Fatalf("unexpected errors: %+v", res.Issues)
+			}
+			if got := res.Rules[0].Action.ProgressStyleResolved(); got != value {
+				t.Errorf("ProgressStyleResolved() = %q, want %q", got, value)
+			}
+		})
+	}
+}
+
+func TestValidate_ProgressStyleDefaultsToMessage(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+`
+	res := parseAndValidate(t, src)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %+v", res.Issues)
+	}
+	if got := res.Rules[0].Action.ProgressStyleResolved(); got != ProgressStyleMessage {
+		t.Errorf("ProgressStyleResolved() = %q, want %q", got, ProgressStyleMessage)
+	}
+}
+
+func TestValidate_ProgressStyleRejectsUnknownValue(t *testing.T) {
+	t.Parallel()
+	src := `
+rules:
+  - name: r
+    trigger: { type: app_mention, keyword: r }
+    action:
+      cwd: /tmp
+      command: [echo]
+      timeout_ms: 1000
+      progress_style: typing_indicator
+`
+	res := parseAndValidate(t, src)
+	if !res.HasErrors() {
+		t.Fatal("expected an error for an unknown progress_style value")
+	}
+}
+
 func TestTrigger_MatchThreadRepliesDefault(t *testing.T) {
 	t.Parallel()
 	src := `

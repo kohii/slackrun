@@ -44,6 +44,7 @@ rules:
       env: { KEY: value }         # optional, extra env for the spawned process
       expose_slack_token: false   # optional; opt-in to forward SLACK_BOT_TOKEN
       reply_with_stdout: true     # optional, default true; see "Reply mode" below
+      progress_style: message     # optional, default "message"; see "Progress style" below
       stdin:                      # optional; ordered list of parts piped to stdin
         - text: "static instructions"
         - trigger_message: { content: command_text }
@@ -284,6 +285,23 @@ session) needs to control reply timing or format itself — e.g. when it
 emits an intermediate status, then a final answer, both via
 `slackrun post`. Without this flag the child's full stdout would be
 re-posted as a third reply.
+
+## Progress style
+
+`action.progress_style` (default `message`) controls how slackrun signals
+"job in progress" while the child runs.
+
+| Value | Mechanism | Effect |
+|---|---|---|
+| `message` (default) | `chat.postMessage` + `chat.update` | Posts a `⏳ Working…` placeholder message and rewrites it in place with elapsed time, then with the final result. |
+| `assistant_status` | `assistant.threads.setStatus` | Shows a transient "Working…" status indicator instead of a visible message. There is no placeholder to rewrite, so the final reply (stdout, `✅ Done`, failure text, etc.) is always posted as a new message, and the status is cleared once it lands. |
+
+`assistant_status` requires the app's Slack token to carry the `chat:write`
+scope (already required for the `message` style) — no extra scope needed.
+Because this API is designed for Slack's AI-app status UI, its behavior
+outside that context (plain channels/threads) is less battle-tested than
+`chat.postMessage`/`chat.update`; try it on a low-stakes rule first if you
+are unsure how it will render in your workspace.
 
 ## Template variables (metadata only)
 

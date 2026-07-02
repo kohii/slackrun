@@ -16,7 +16,7 @@ type jobRegistry struct {
 }
 
 type jobEntry struct {
-	progress *ProgressHandle
+	progress ProgressHandle
 	handle   *runner.Handle
 }
 
@@ -24,7 +24,7 @@ func newJobRegistry() *jobRegistry {
 	return &jobRegistry{live: make(map[string]*jobEntry)}
 }
 
-func (r *jobRegistry) register(id string, p *ProgressHandle, h *runner.Handle) {
+func (r *jobRegistry) register(id string, p ProgressHandle, h *runner.Handle) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.live[id] = &jobEntry{progress: p, handle: h}

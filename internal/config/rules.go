@@ -213,6 +213,17 @@ type Action struct {
 	//                 is updated to "✅ Done" on success. Failures still
 	//                 surface in Slack so silent crashes stay visible.
 	ReplyWithStdout *bool `yaml:"reply_with_stdout,omitempty"`
+	// ProgressStyle picks how slackrun surfaces "job in progress" state while
+	// the child runs:
+	//   "" / "message"     (default) — post a "⏳ Working…" placeholder
+	//                       message and rewrite it via chat.update as the
+	//                       job progresses and completes.
+	//   "assistant_status" — use assistant.threads.setStatus for a
+	//                        transient status indicator instead of a visible
+	//                        message. There is no placeholder to rewrite, so
+	//                        the final reply is always posted as a new
+	//                        message.
+	ProgressStyle string `yaml:"progress_style,omitempty"`
 	// Stdin is an ordered list of parts. slackrun renders each part and
 	// concatenates the results into the byte stream piped to the child's
 	// stdin. Absent / nil means the child reads nothing.
@@ -223,6 +234,21 @@ type Action struct {
 // Default is true (current behaviour); an explicit `false` opts out.
 func (a Action) ReplyWithStdoutEnabled() bool {
 	return a.ReplyWithStdout == nil || *a.ReplyWithStdout
+}
+
+// Progress style values for Action.ProgressStyle.
+const (
+	ProgressStyleMessage         = "message"
+	ProgressStyleAssistantStatus = "assistant_status"
+)
+
+// ProgressStyleResolved returns the resolved progress style, defaulting to
+// ProgressStyleMessage when unset.
+func (a Action) ProgressStyleResolved() string {
+	if a.ProgressStyle == "" {
+		return ProgressStyleMessage
+	}
+	return a.ProgressStyle
 }
 
 // StdinPartKind discriminates the variants of StdinPart.
@@ -809,6 +835,12 @@ func validateRule(r Rule) []ValidationIssue {
 	}
 	if r.Action.TimeoutMs <= 0 {
 		add(IssueError, fmt.Sprintf("action.timeout_ms must be > 0 (got %d)", r.Action.TimeoutMs))
+	}
+	switch r.Action.ProgressStyle {
+	case "", ProgressStyleMessage, ProgressStyleAssistantStatus:
+	default:
+		add(IssueError, fmt.Sprintf("action.progress_style must be %q or %q (got %q)",
+			ProgressStyleMessage, ProgressStyleAssistantStatus, r.Action.ProgressStyle))
 	}
 	validateExtract(r.Trigger.Extract, add)
 	if r.Action.Stdin != nil {

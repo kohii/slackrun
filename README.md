@@ -18,7 +18,8 @@ that prints to stdout can be wired up.
 4. The configured command (fixed argv, no template expansion) is spawned
    with the rule's `cwd` and environment.
 5. A `⏳ Working…` placeholder lands in a thread and updates every ~5s with
-   elapsed time.
+   elapsed time (or, with `action.progress_style: assistant_status`, an
+   `assistant.threads.setStatus` indicator instead — see `docs/rules.md`).
 6. On exit (by default), the placeholder is overwritten with stdout
    (chunked across multiple posts, or attached as a file, depending on
    length). Rules can set `action.reply_with_stdout: false` so the child

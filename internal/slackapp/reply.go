@@ -27,7 +27,7 @@ type ReplyClient interface {
 // choosing the smallest delivery shape that fits (chat.update / multi-post /
 // file upload). The progress message is overwritten or deleted as a side
 // effect; callers must not also Update the handle.
-func PostCompletionReply(ctx context.Context, c ReplyClient, progress *ProgressHandle, threadTS, rawStdout string) error {
+func PostCompletionReply(ctx context.Context, c ReplyClient, progress ProgressHandle, threadTS, rawStdout string) error {
 	cleaned := util.SanitizeForSlack(rawStdout)
 	if cleaned == "" {
 		return progress.Update("✅ Done (no output)")
@@ -44,7 +44,7 @@ func PostCompletionReply(ctx context.Context, c ReplyClient, progress *ProgressH
 			return err
 		}
 		for _, part := range plan.Parts[1:] {
-			if _, _, err := c.PostMessage(progress.Channel,
+			if _, _, err := c.PostMessage(progress.Channel(),
 				slack.MsgOptionText(part, false),
 				slack.MsgOptionTS(threadTS),
 				slack.MsgOptionDisableMarkdown(),
@@ -59,7 +59,7 @@ func PostCompletionReply(ctx context.Context, c ReplyClient, progress *ProgressH
 			// Caller will see the orphan ⏳ message and can clean up manually.
 			_ = err
 		}
-		return uploadAsFile(ctx, c, progress.Channel, threadTS, plan.Text)
+		return uploadAsFile(ctx, c, progress.Channel(), threadTS, plan.Text)
 	}
 	return fmt.Errorf("unknown plan kind %d", plan.Kind)
 }
