@@ -104,6 +104,10 @@ its own display name. Prefer `user_ids` or `app_ids` when possible.
 
 `stdin` is an ordered list of **parts**. slackrun renders each part in order
 and concatenates the results into the byte stream piped to the child's stdin.
+A single `\n` is inserted between consecutive non-empty parts when the
+previous part's output does not already end in one, so an inline
+`text: "hi"` does not run into the next part. If a part renders empty
+(see below), it contributes nothing — no separator is emitted for it.
 
 A part is exactly one of:
 
@@ -145,7 +149,8 @@ the wrapper is the marker that there *is* a triggering message — even when
 the chosen `content` mode yields an empty body (e.g. `command_text` on a
 `@bot`-only mention).
 
-`text:` parts are never elided; if you write a `text:` you get it verbatim.
+`text:` parts are never elided; if you write a `text:` you get it verbatim
+(the between-parts `\n` above is inserted around the chunk, not inside it).
 Labels that should disappear alongside an empty `thread:` belong in that
 part's `heading:` field, not in a separate `text:` part.
 

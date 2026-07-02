@@ -352,6 +352,67 @@ func TestBuildStdinPayload_SlackrunHelpInjectsChildUsage(t *testing.T) {
 	}
 }
 
+func TestBuildStdinPayload_AutoNewlineBetweenParts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		parts []config.StdinPart
+		want  string
+	}{
+		{
+			// Inline `text: "..."` has no trailing newline — the seam
+			// against the next part is what this feature exists to fix.
+			name: "inline text without trailing newline gets a separator",
+			parts: []config.StdinPart{
+				{Kind: config.PartKindText, Text: "hello"},
+				{Kind: config.PartKindText, Text: "world"},
+			},
+			want: "hello\nworld",
+		},
+		{
+			// YAML `text: |` naturally ends with '\n'. The auto-insert
+			// must not double up on it.
+			name: "text ending in newline is left alone",
+			parts: []config.StdinPart{
+				{Kind: config.PartKindText, Text: "hello\n"},
+				{Kind: config.PartKindText, Text: "world"},
+			},
+			want: "hello\nworld",
+		},
+		{
+			// A thread part on a standalone mention renders empty (no
+			// replies to include). It must contribute nothing to the seam
+			// — otherwise a phantom '\n' shows up between its neighbors.
+			name: "empty part in the middle contributes no separator",
+			parts: []config.StdinPart{
+				{Kind: config.PartKindText, Text: "before"},
+				{Kind: config.PartKindThread, Thread: &config.ThreadSpec{}},
+				{Kind: config.PartKindText, Text: "after"},
+			},
+			want: "before\nafter",
+		},
+		{
+			// No separator before the first non-empty chunk.
+			name: "leading empty part does not emit a stray newline",
+			parts: []config.StdinPart{
+				{Kind: config.PartKindThread, Thread: &config.ThreadSpec{}},
+				{Kind: config.PartKindText, Text: "only"},
+			},
+			want: "only",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got := BuildStdinPayload(StdinBuildInput{Parts: c.parts})
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestGenerateNonce_HexAndLength(t *testing.T) {
 	t.Parallel()
 	n := generateNonce()

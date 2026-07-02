@@ -713,68 +713,95 @@ type StdinBuildInput struct {
 // stream suitable for piping to the child. Slack-derived parts that resolve
 // to empty (e.g. a thread part on a standalone mention with
 // IncludeTriggeringMessage:false) contribute nothing — their `heading:`
-// disappears with them.
+// disappears with them. A single '\n' is inserted between consecutive
+// non-empty parts when the previous part's output does not already end in
+// one, so an inline `text: "hi"` does not butt up against the next part.
 func BuildStdinPayload(in StdinBuildInput) string {
 	var sb strings.Builder
 	for _, p := range in.Parts {
-		switch p.Kind {
-		case config.PartKindText:
-			sb.WriteString(dispatch.ExpandTemplate(p.Text, in.Vars))
-
-		case config.PartKindTriggerMessage:
-			spec := p.TriggerMessage
-			if spec == nil {
-				spec = &config.TriggerMessageSpec{}
-			}
-			msg := buildTriggerMessage(in.Event, in.Match, spec.Content, in.SelfUserID, in.SelfBotID)
-			body := slackthread.RenderTriggerMessage(msg, slackthread.RenderOptions{
-				Nonce:             in.Nonce,
-				Format:            slackthread.FormatText,
-				IncludeTimestamps: spec.IncludeTimestamps,
-				Files:             slackthread.FilesMode(spec.Files),
-			})
-			writePartWithHeading(&sb, spec.Heading, body)
-
-		case config.PartKindThread:
-			spec := p.Thread
-			if spec == nil {
-				spec = &config.ThreadSpec{}
-			}
-			msgs := in.Thread
-			if !spec.IncludeTriggeringMessage && in.Event.TS != "" {
-				msgs = excludeByTS(msgs, in.Event.TS)
-			}
-			body := slackthread.RenderThread(msgs, slackthread.RenderOptions{
-				Nonce:             in.Nonce,
-				Format:            slackthread.Format(spec.Format),
-				MaxMessages:       spec.MaxMessages,
-				MaxBytes:          spec.MaxBytes,
-				IncludeTimestamps: spec.IncludeTimestamps,
-				Files:             slackthread.FilesMode(spec.Files),
-			})
-			writePartWithHeading(&sb, spec.Heading, body)
-
-		case config.PartKindSlackrunHelp:
-			sb.WriteString(clidoc.ChildUsage)
-		}
+		chunk := renderStdinPart(p, in)
+		appendPart(&sb, chunk)
 	}
 	return sb.String()
 }
 
-// writePartWithHeading writes `heading\nbody` when body is non-empty; the
+func renderStdinPart(p config.StdinPart, in StdinBuildInput) string {
+	switch p.Kind {
+	case config.PartKindText:
+		return dispatch.ExpandTemplate(p.Text, in.Vars)
+
+	case config.PartKindTriggerMessage:
+		spec := p.TriggerMessage
+		if spec == nil {
+			spec = &config.TriggerMessageSpec{}
+		}
+		msg := buildTriggerMessage(in.Event, in.Match, spec.Content, in.SelfUserID, in.SelfBotID)
+		body := slackthread.RenderTriggerMessage(msg, slackthread.RenderOptions{
+			Nonce:             in.Nonce,
+			Format:            slackthread.FormatText,
+			IncludeTimestamps: spec.IncludeTimestamps,
+			Files:             slackthread.FilesMode(spec.Files),
+		})
+		return renderPartWithHeading(spec.Heading, body)
+
+	case config.PartKindThread:
+		spec := p.Thread
+		if spec == nil {
+			spec = &config.ThreadSpec{}
+		}
+		msgs := in.Thread
+		if !spec.IncludeTriggeringMessage && in.Event.TS != "" {
+			msgs = excludeByTS(msgs, in.Event.TS)
+		}
+		body := slackthread.RenderThread(msgs, slackthread.RenderOptions{
+			Nonce:             in.Nonce,
+			Format:            slackthread.Format(spec.Format),
+			MaxMessages:       spec.MaxMessages,
+			MaxBytes:          spec.MaxBytes,
+			IncludeTimestamps: spec.IncludeTimestamps,
+			Files:             slackthread.FilesMode(spec.Files),
+		})
+		return renderPartWithHeading(spec.Heading, body)
+
+	case config.PartKindSlackrunHelp:
+		return clidoc.ChildUsage
+	}
+	return ""
+}
+
+// renderPartWithHeading returns `heading\nbody` when body is non-empty; the
 // heading vanishes alongside an empty body so an absent thread does not
 // leave its label orphaned in stdin.
-func writePartWithHeading(sb *strings.Builder, heading, body string) {
+func renderPartWithHeading(heading, body string) string {
 	if body == "" {
+		return ""
+	}
+	if heading == "" {
+		return body
+	}
+	var sb strings.Builder
+	sb.WriteString(heading)
+	if !strings.HasSuffix(heading, "\n") {
+		sb.WriteByte('\n')
+	}
+	sb.WriteString(body)
+	return sb.String()
+}
+
+// appendPart writes chunk into sb, ensuring at least one '\n' sits between
+// this chunk and whatever was already there. Empty chunks are skipped so
+// elided parts contribute nothing (no stray separator).
+func appendPart(sb *strings.Builder, chunk string) {
+	if chunk == "" {
 		return
 	}
-	if heading != "" {
-		sb.WriteString(heading)
-		if !strings.HasSuffix(heading, "\n") {
+	if sb.Len() > 0 {
+		s := sb.String()
+		if s[len(s)-1] != '\n' {
 			sb.WriteByte('\n')
 		}
 	}
-	sb.WriteString(body)
+	sb.WriteString(chunk)
 }
 
 // buildTriggerMessage assembles a slackthread.Message representing the

@@ -183,66 +183,90 @@ func matchKindName(k dispatch.MatchKind) string {
 // renderStdinPreview composes the parts as runMatched would, but without
 // fetching a real thread. A synthesized one-message thread mirrors the
 // triggering event so include_triggering_message:false on a standalone
-// mention collapses the part exactly as it would in production.
+// mention collapses the part exactly as it would in production. The same
+// between-parts newline rule as BuildStdinPayload applies here so the
+// preview matches what the child actually sees.
 func renderStdinPreview(parts []config.StdinPart, vars dispatch.TemplateVars, ev dispatch.IncomingEvent, res dispatch.MatchResult) string {
 	thread := previewThread(ev)
 	var sb strings.Builder
 	for _, p := range parts {
-		switch p.Kind {
-		case config.PartKindText:
-			sb.WriteString(dispatch.ExpandTemplate(p.Text, vars))
-
-		case config.PartKindTriggerMessage:
-			spec := p.TriggerMessage
-			if spec == nil {
-				spec = &config.TriggerMessageSpec{}
-			}
-			msg := previewTriggerMessage(ev, res, spec.Content)
-			body := slackthread.RenderTriggerMessage(msg, slackthread.RenderOptions{
-				Nonce:             "preview",
-				Format:            slackthread.FormatText,
-				IncludeTimestamps: spec.IncludeTimestamps,
-				Files:             slackthread.FilesMode(spec.Files),
-			})
-			writePartWithHeading(&sb, spec.Heading, body)
-
-		case config.PartKindThread:
-			spec := p.Thread
-			if spec == nil {
-				spec = &config.ThreadSpec{}
-			}
-			msgs := thread
-			if !spec.IncludeTriggeringMessage && ev.TS != "" {
-				msgs = filterOutTS(msgs, ev.TS)
-			}
-			body := slackthread.RenderThread(msgs, slackthread.RenderOptions{
-				Nonce:             "preview",
-				Format:            slackthread.Format(spec.Format),
-				MaxMessages:       spec.MaxMessages,
-				MaxBytes:          spec.MaxBytes,
-				IncludeTimestamps: spec.IncludeTimestamps,
-				Files:             slackthread.FilesMode(spec.Files),
-			})
-			writePartWithHeading(&sb, spec.Heading, body)
-
-		case config.PartKindSlackrunHelp:
-			sb.WriteString(clidoc.ChildUsage)
-		}
+		chunk := renderPartPreview(p, vars, ev, res, thread)
+		appendPart(&sb, chunk)
 	}
 	return sb.String()
 }
 
-func writePartWithHeading(sb *strings.Builder, heading, body string) {
+func renderPartPreview(p config.StdinPart, vars dispatch.TemplateVars, ev dispatch.IncomingEvent, res dispatch.MatchResult, thread []slackthread.Message) string {
+	switch p.Kind {
+	case config.PartKindText:
+		return dispatch.ExpandTemplate(p.Text, vars)
+
+	case config.PartKindTriggerMessage:
+		spec := p.TriggerMessage
+		if spec == nil {
+			spec = &config.TriggerMessageSpec{}
+		}
+		msg := previewTriggerMessage(ev, res, spec.Content)
+		body := slackthread.RenderTriggerMessage(msg, slackthread.RenderOptions{
+			Nonce:             "preview",
+			Format:            slackthread.FormatText,
+			IncludeTimestamps: spec.IncludeTimestamps,
+			Files:             slackthread.FilesMode(spec.Files),
+		})
+		return renderPartWithHeading(spec.Heading, body)
+
+	case config.PartKindThread:
+		spec := p.Thread
+		if spec == nil {
+			spec = &config.ThreadSpec{}
+		}
+		msgs := thread
+		if !spec.IncludeTriggeringMessage && ev.TS != "" {
+			msgs = filterOutTS(msgs, ev.TS)
+		}
+		body := slackthread.RenderThread(msgs, slackthread.RenderOptions{
+			Nonce:             "preview",
+			Format:            slackthread.Format(spec.Format),
+			MaxMessages:       spec.MaxMessages,
+			MaxBytes:          spec.MaxBytes,
+			IncludeTimestamps: spec.IncludeTimestamps,
+			Files:             slackthread.FilesMode(spec.Files),
+		})
+		return renderPartWithHeading(spec.Heading, body)
+
+	case config.PartKindSlackrunHelp:
+		return clidoc.ChildUsage
+	}
+	return ""
+}
+
+func renderPartWithHeading(heading, body string) string {
 	if body == "" {
+		return ""
+	}
+	if heading == "" {
+		return body
+	}
+	var sb strings.Builder
+	sb.WriteString(heading)
+	if !strings.HasSuffix(heading, "\n") {
+		sb.WriteByte('\n')
+	}
+	sb.WriteString(body)
+	return sb.String()
+}
+
+func appendPart(sb *strings.Builder, chunk string) {
+	if chunk == "" {
 		return
 	}
-	if heading != "" {
-		sb.WriteString(heading)
-		if !strings.HasSuffix(heading, "\n") {
+	if sb.Len() > 0 {
+		s := sb.String()
+		if s[len(s)-1] != '\n' {
 			sb.WriteByte('\n')
 		}
 	}
-	sb.WriteString(body)
+	sb.WriteString(chunk)
 }
 
 // previewThread synthesizes a one-message thread from the event payload so
