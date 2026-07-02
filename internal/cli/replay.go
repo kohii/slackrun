@@ -1,15 +1,16 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kohii/slackrun/internal/config"
@@ -254,6 +255,19 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		return replayExitOK
 	}
 
+	// Subscribe to signals *before* spawn so a Ctrl+C landing in the tiny
+	// window between exec and handler wiring still results in the child
+	// being killed rather than orphaned. Setpgid=true on the child means
+	// terminal SIGINT hits only this parent — the forwarding is on us.
+	//
+	// Two-stage: first signal invokes Handle.Kill (SIGTERM → 5s → SIGKILL).
+	// A second signal during that grace period impatiently escalates by
+	// sending SIGKILL directly to the child's process group so the CLI
+	// doesn't sit waiting on a SIGTERM-ignoring child.
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
 	handle := runner.Run(runner.Options{
 		Command:          rule.Action.Command,
 		Cwd:              rule.Action.Cwd,
@@ -264,14 +278,28 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		Stdout:           stdout,
 		Stderr:           stderr,
 	})
-	// Cancel on SIGINT so Ctrl+C reliably stops the child.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	killed := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		handle.Kill()
+		count := 0
+		for {
+			select {
+			case <-sigCh:
+				count++
+				if count == 1 {
+					handle.Kill()
+					continue
+				}
+				if handle.Pid > 0 {
+					_ = syscall.Kill(-handle.Pid, syscall.SIGKILL)
+				}
+				return
+			case <-killed:
+				return
+			}
+		}
 	}()
 	result := <-handle.Done
+	close(killed)
 	if result.StartErr != nil {
 		fmt.Fprintln(stderr, "spawn:", result.StartErr)
 		return replayExitChildFail
