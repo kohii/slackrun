@@ -22,6 +22,10 @@ type Result struct {
 	// TimedOut is true if the command was terminated because its rule's
 	// timeout fired. The exit code in that case is irrelevant.
 	TimedOut bool
+	// Killed is true if Kill() was invoked explicitly (admin API / shutdown)
+	// and TimedOut is not. Distinguishes a manual stop from a natural exit
+	// even though both surface as ExitCode=-1.
+	Killed bool
 	// NotFound is true if the command binary itself could not be located
 	// (ENOENT). Distinct from a runtime exit-code != 0.
 	NotFound bool
@@ -62,9 +66,11 @@ type Options struct {
 
 // Handle exposes the running job. Done fires exactly once with the final
 // Result. Kill is idempotent and triggers the SIGTERM → SIGKILL sequence.
+// Pid is 0 until the child has been Start()ed; on start failure it stays 0.
 type Handle struct {
 	Done <-chan Result
 	Kill func()
+	Pid  int
 }
 
 const defaultSigKillGrace = 5 * time.Second
@@ -184,20 +190,23 @@ func Run(opts Options) Handle {
 			Stdout:   stdout.String(),
 			Stderr:   stderrText,
 			TimedOut: timedOut.Load(),
+			Killed:   killed.Load() && !timedOut.Load(),
 		}
 	}()
 
-	return Handle{Done: done, Kill: sendKill}
+	return Handle{Done: done, Kill: sendKill, Pid: cmd.Process.Pid}
 }
 
-// alwaysStripFromOverride lists env keys that are *secrets* — they must never
-// be supplied by a rule. `SLACK_BOT_TOKEN` is the opt-in case (gated by
-// Options.ExposeSlackToken from the parent env), `SLACK_APP_TOKEN` and
-// `ALLOWED_USER_IDS` have no legitimate child use.
+// alwaysStripFromOverride lists env keys a rule can never inject into the
+// child. `SLACK_BOT_TOKEN` is opt-in through Options.ExposeSlackToken;
+// `SLACK_APP_TOKEN` / `ALLOWED_USER_IDS` have no legitimate child use;
+// `SLACKRUN_ADMIN_SOCKET` names the host daemon's admin surface, which is
+// documented (docs/security.md) as unreachable from spawned children.
 var alwaysStripFromOverride = map[string]struct{}{
-	"SLACK_BOT_TOKEN":  {},
-	"SLACK_APP_TOKEN":  {},
-	"ALLOWED_USER_IDS": {},
+	"SLACK_BOT_TOKEN":       {},
+	"SLACK_APP_TOKEN":       {},
+	"ALLOWED_USER_IDS":      {},
+	"SLACKRUN_ADMIN_SOCKET": {},
 }
 
 // slackrunReservedKeys are vars slackrun injects on every spawn. Rules cannot
@@ -239,6 +248,14 @@ func buildEnv(overrides map[string]string, exposeSlackToken bool) []string {
 			continue
 		}
 		if key == "SLACK_APP_TOKEN" || key == "ALLOWED_USER_IDS" {
+			continue
+		}
+		// SLACKRUN_ADMIN_SOCKET is a host-daemon concern. Letting it leak
+		// to child processes would invite them to call `slackrun runs`
+		// or `slackrun kill` against the very daemon that spawned them,
+		// which is outside the child's advertised surface (see
+		// docs/security.md).
+		if key == "SLACKRUN_ADMIN_SOCKET" {
 			continue
 		}
 		filtered = append(filtered, kv)

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/kohii/slackrun/internal/adminapi"
 	"github.com/kohii/slackrun/internal/config"
 	"github.com/kohii/slackrun/internal/logging"
 	"github.com/kohii/slackrun/internal/slackapp"
@@ -79,10 +80,38 @@ func RunStart(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if err := app.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	// Admin API is opt-out via SLACKRUN_ADMIN_SOCKET=off; on failure the
+	// dispatcher still runs (adminServer(...) logs and returns nil).
+	admin := adminServer(app, Version)
+
+	if err := app.Run(ctx, admin); err != nil && !errors.Is(err, context.Canceled) {
 		logging.Error("socketmode exit", logging.F("error", err))
 		return 1
 	}
 	logging.Info("shutdown complete")
 	return 0
+}
+
+// Version is populated by cmd/slackrun/main.go via SetVersion so the admin
+// API can surface it on /v1/health without introducing a cli→cmd import.
+var Version = "dev"
+
+// SetVersion is called from cmd/slackrun/main.go so the admin /v1/health
+// endpoint can report the exact build.
+func SetVersion(v string) { Version = v }
+
+// adminServer resolves the socket path and returns a startable admin
+// server. Disabled (SLACKRUN_ADMIN_SOCKET=off) → nil; app.Run handles nil
+// as "no admin". Non-off resolution errors are logged and treated the same
+// way (fail-open), so a misconfigured admin path never blocks dispatch.
+func adminServer(app *slackapp.App, version string) slackapp.AdminServer {
+	if _, err := adminapi.ResolveSocketPath(); err != nil {
+		if errors.Is(err, adminapi.ErrDisabled) {
+			logging.Info("admin api disabled", logging.F("env", adminapi.SocketEnvVar))
+		} else {
+			logging.Warn("admin api resolve failed; disabling", logging.F("error", err))
+		}
+		return nil
+	}
+	return adminapi.New(adminapi.Options{Runs: app.Runs(), Version: version})
 }

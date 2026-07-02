@@ -16,6 +16,7 @@ import (
 var Version = "dev"
 
 func main() {
+	cli.SetVersion(Version)
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, clidoc.MainUsage)
 		os.Exit(2)
@@ -23,6 +24,10 @@ func main() {
 	switch os.Args[1] {
 	case "start":
 		os.Exit(cli.RunStart(os.Args[2:], os.Stdout, os.Stderr))
+	case "runs", "ps":
+		os.Exit(cli.RunRuns(os.Args[2:], os.Stdout, os.Stderr))
+	case "kill":
+		os.Exit(cli.RunKill(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
 	case "check":
 		os.Exit(cli.RunCheck(os.Args[2:], os.Stdout, os.Stderr))
 	case "dry-run":

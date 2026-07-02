@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/kohii/slackrun/internal/config"
 	"github.com/kohii/slackrun/internal/dispatch"
 	"github.com/kohii/slackrun/internal/logging"
+	"github.com/kohii/slackrun/internal/runmgr"
 	"github.com/kohii/slackrun/internal/runner"
 	"github.com/kohii/slackrun/internal/slackthread"
 	"github.com/kohii/slackrun/internal/util"
@@ -38,8 +40,12 @@ type App struct {
 	selfUserID     string
 	selfBotID      string
 
-	jobs *jobRegistry
+	runs *runmgr.Manager
 }
+
+// Runs exposes the run manager so the admin HTTP layer (internal/adminapi)
+// and CLI wiring can share the same in-flight registry as the dispatcher.
+func (a *App) Runs() *runmgr.Manager { return a.runs }
 
 // Options configures a new App. BootTime defaults to time.Now if zero.
 type Options struct {
@@ -92,7 +98,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		dedupe:         d,
 		selfUserID:     authResp.UserID,
 		selfBotID:      authResp.BotID,
-		jobs:           newJobRegistry(),
+		runs:           runmgr.New(),
 	}
 	logging.Info("bot ready",
 		logging.F("team", authResp.Team),
@@ -105,13 +111,29 @@ func New(ctx context.Context, opts Options) (*App, error) {
 	return app, nil
 }
 
+// AdminServer is the tiny surface App.Run needs from an admin listener.
+// Kept as an interface so the admin API can live in its own package
+// (internal/adminapi) without introducing an import cycle with slackapp.
+type AdminServer interface {
+	Start() error
+	Stop(ctx context.Context)
+}
+
 // Run drives the Socket Mode connection and event loop. Blocks until ctx is
 // cancelled or the underlying connection fails. In-flight jobs receive a kill
 // and their progress messages are overwritten with "⚠️ Bot stopped" before
-// Run returns.
-func (a *App) Run(ctx context.Context) error {
+// Run returns. Pass a non-nil admin to expose the runs/kill HTTP surface.
+func (a *App) Run(ctx context.Context, admin AdminServer) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	if admin != nil {
+		if err := admin.Start(); err != nil {
+			// Admin listener failure is logged but not fatal — the
+			// dispatcher itself is unaffected.
+			logging.Warn("admin api start failed", logging.F("error", err))
+		}
+	}
 
 	var loopWG sync.WaitGroup
 	loopWG.Add(1)
@@ -124,7 +146,16 @@ func (a *App) Run(ctx context.Context) error {
 	cancel()
 	loopWG.Wait()
 
-	a.jobs.stopAll("⚠️ Bot stopped", 7*time.Second)
+	// Ordering matters: stop accepting new admin calls before we start
+	// tearing down live runs, otherwise an admin kill mid-shutdown races
+	// with Manager.Shutdown for the entry's cause. 2s is generous — the
+	// only handlers are in-memory reads and a Slack chat.update.
+	if admin != nil {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		admin.Stop(stopCtx)
+		stopCancel()
+	}
+	a.runs.Shutdown(context.Background(), "⚠️ Bot stopped", 7*time.Second)
 	return runErr
 }
 
@@ -300,8 +331,20 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		return
 	}
 
-	jobID := fmt.Sprintf("%s:%s:%s", ev.Channel, ev.TS, rule.Name)
-	a.jobs.register(jobID, progress, nil)
+	fullID := fmt.Sprintf("%s:%s:%s", ev.Channel, ev.TS, rule.Name)
+	runID, err := a.runs.Register(runmgr.Meta{
+		FullID:    fullID,
+		RuleName:  rule.Name,
+		ChannelID: ev.Channel,
+		UserID:    ev.User,
+		ThreadTS:  threadTS,
+		StartedAt: time.Now(),
+	}, progress)
+	if err != nil {
+		logging.Error("run register failed", logging.F("error", err), logging.F("rule", rule.Name))
+		_ = progress.Update("❌ Internal error (see logs)")
+		return
+	}
 
 	var permalink string
 	if needsPermalink(rule.Action.Stdin) {
@@ -358,21 +401,39 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		runOpts.Stdin = strings.NewReader(stdinPayload)
 	}
 	handle := runner.Run(runOpts)
-	a.jobs.updateExec(jobID, &handle)
-	defer a.jobs.unregister(jobID)
+	if err := a.runs.AttachHandle(runID, runnerHandleAdapter{h: handle}); err != nil {
+		if errors.Is(err, runmgr.ErrCancelled) {
+			// Shutdown flipped this run to Cancelled while we were still
+			// preparing (permalink lookup / stdin build). We already spawned
+			// — kill the orphan immediately so Shutdown's Wait actually
+			// converges instead of stalling on a live child.
+			logging.Info("run cancelled during preparation; killing orphan child",
+				logging.F("rule", rule.Name), logging.F("runId", runID))
+			handle.Kill()
+		} else {
+			logging.Warn("run attach handle failed", logging.F("error", err), logging.F("rule", rule.Name))
+		}
+	}
 
 	result := <-handle.Done
 
+	finalCause, killReason := a.runs.Complete(runID, resultToCause(result), result.ExitCode)
+
 	logging.Info("job done",
 		logging.F("rule", rule.Name),
+		logging.F("runId", runID),
 		logging.F("exitCode", result.ExitCode),
-		logging.F("timedOut", result.TimedOut),
-		logging.F("notFound", result.NotFound),
+		logging.F("cause", finalCause.String()),
 		logging.F("stdoutLen", len(result.Stdout)),
 		logging.F("stderrLen", len(result.Stderr)),
 	)
 
-	switch decideCompletion(result, rule.Action.ReplyWithStdoutEnabled()) {
+	switch decideCompletion(finalCause, result.ExitCode, rule.Action.ReplyWithStdoutEnabled()) {
+	case completionSkip:
+		// Kill / Shutdown paths posted the terminal message themselves;
+		// nothing more to do here. Any leftover ⏳ ticker has already been
+		// halted by progress.Update's sync.Once.
+		_ = killReason
 	case completionTimeout:
 		_ = progress.Update("⏱️ Timed out (" + util.FormatDuration(timeout) + ")")
 	case completionNotFound:
@@ -404,21 +465,29 @@ const (
 	completionTimeout
 	completionNotFound
 	completionFailed
+	// completionSkip: another path (admin kill, shutdown) has already
+	// written the terminal progress message. Do nothing.
+	completionSkip
 )
 
-func decideCompletion(r runner.Result, replyWithStdout bool) completionAction {
-	switch {
-	case r.TimedOut:
+func decideCompletion(cause runmgr.ExitCause, exitCode int, replyWithStdout bool) completionAction {
+	switch cause {
+	case runmgr.CauseKilled, runmgr.CauseShutdown:
+		return completionSkip
+	case runmgr.CauseTimedOut:
 		return completionTimeout
-	case r.NotFound:
+	case runmgr.CauseNotFound:
 		return completionNotFound
-	case r.ExitCode != 0:
+	case runmgr.CauseStartError:
 		return completionFailed
-	case !replyWithStdout:
-		return completionMarkDone
-	default:
-		return completionPostStdout
 	}
+	if exitCode != 0 {
+		return completionFailed
+	}
+	if !replyWithStdout {
+		return completionMarkDone
+	}
+	return completionPostStdout
 }
 
 func (a *App) resolvePermalink(ctx context.Context, channel, ts string) string {

@@ -143,6 +143,31 @@ slackrun now filters that pass-through:
 load time; even if a caller smuggles one through `runner.Options.Env`, the
 final strip pass in `buildEnv` drops it.
 
+## Admin API (`slackrun runs` / `slackrun kill`)
+
+`slackrun start` opens a UNIX-domain socket for its admin surface. Two
+clients speak to it: `slackrun runs` (list in-flight children) and
+`slackrun kill` (send SIGTERM). There is no TCP listener.
+
+| Boundary | Enforced by |
+|---|---|
+| Only the same OS user can call the API | The socket file is `chmod 0600` in a per-user directory (`$XDG_RUNTIME_DIR/slackrun/` on Linux, `$TMPDIR` on macOS). Any other UID on the box gets EPERM. |
+| The child-facing help (`slackrun_help` stdin part, `ChildUsage`) does **not** advertise `runs` / `kill`. | `internal/clidoc/usage.go` lists them only in `MainUsage`. |
+| Kill requests are best-effort SIGTERM (then SIGKILL after 5s) on the child's process group | `runner.Handle.Kill` uses `-pgid` so shell wrappers are torn down too. |
+
+Trust model: **any process running as the same OS user** — including
+slackrun's own spawned children — can talk to the daemon. `runner.buildEnv`
+strips `SLACKRUN_ADMIN_SOCKET` from the child's env so an untargeted
+`slackrun kill` from a child doesn't just work "by accident", but a child
+that resolves the default socket path can still reach the API. If that
+matters for your rule set, run those children under a different UID (e.g.
+sandboxed via macOS's `sandbox-exec` or Linux user namespaces) — the
+socket's file permission is the enforcement, not the env var.
+
+The socket path can be overridden with `SLACKRUN_ADMIN_SOCKET=/path/to/x.sock`
+or disabled outright with `SLACKRUN_ADMIN_SOCKET=off`. Do not run slackrun
+as a user that shares a UID with untrusted software.
+
 ## Dedupe and boot-time replay
 
 `Dedupe` rejects events older than `bootTime - MIN_EVENT_AGE_MS_AT_BOOT` so a

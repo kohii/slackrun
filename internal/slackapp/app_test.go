@@ -6,7 +6,7 @@ import (
 
 	"github.com/kohii/slackrun/internal/config"
 	"github.com/kohii/slackrun/internal/dispatch"
-	"github.com/kohii/slackrun/internal/runner"
+	"github.com/kohii/slackrun/internal/runmgr"
 	"github.com/kohii/slackrun/internal/slackthread"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -295,23 +295,27 @@ func TestDecideCompletion(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name            string
-		result          runner.Result
+		cause           runmgr.ExitCause
+		exitCode        int
 		replyWithStdout bool
 		want            completionAction
 	}{
-		{"timeout beats everything", runner.Result{TimedOut: true}, true, completionTimeout},
-		{"not-found beats failure", runner.Result{NotFound: true, ExitCode: 1}, true, completionNotFound},
-		{"exit code != 0 → failed", runner.Result{ExitCode: 2}, true, completionFailed},
-		{"success default → post stdout", runner.Result{}, true, completionPostStdout},
-		{"success + reply disabled → mark done", runner.Result{}, false, completionMarkDone},
-		{"failure + reply disabled → still report failure", runner.Result{ExitCode: 1}, false, completionFailed},
-		{"timeout + reply disabled → still report timeout", runner.Result{TimedOut: true}, false, completionTimeout},
+		{"kill wins over natural exit", runmgr.CauseKilled, -1, true, completionSkip},
+		{"shutdown skips finalisation", runmgr.CauseShutdown, -1, true, completionSkip},
+		{"timeout renders its own message", runmgr.CauseTimedOut, -1, true, completionTimeout},
+		{"not-found is distinct from failure", runmgr.CauseNotFound, -1, true, completionNotFound},
+		{"start error surfaces as failed", runmgr.CauseStartError, -1, true, completionFailed},
+		{"exit code != 0 → failed", runmgr.CauseExit, 2, true, completionFailed},
+		{"success default → post stdout", runmgr.CauseExit, 0, true, completionPostStdout},
+		{"success + reply disabled → mark done", runmgr.CauseExit, 0, false, completionMarkDone},
+		{"failure + reply disabled → still report failure", runmgr.CauseExit, 1, false, completionFailed},
+		{"timeout + reply disabled → still report timeout", runmgr.CauseTimedOut, -1, false, completionTimeout},
 	}
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			if got := decideCompletion(c.result, c.replyWithStdout); got != c.want {
+			if got := decideCompletion(c.cause, c.exitCode, c.replyWithStdout); got != c.want {
 				t.Errorf("got %v, want %v", got, c.want)
 			}
 		})

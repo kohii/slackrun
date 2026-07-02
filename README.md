@@ -162,3 +162,12 @@ slack-app-manifest.yaml
 | Restart after config edit | `launchctl kickstart -k gui/$(id -u)/com.slackrun.slackrun` |
 | Tail the log | `tail -f ~/Library/Logs/slackrun.log` |
 | Stop | `launchctl bootout gui/$(id -u)/com.slackrun.slackrun` |
+| List in-flight children | `./slackrun runs` (alias `ps`; `--json` for machine output) |
+| Kill a child | `./slackrun kill <id> [--reason "…"]` |
+| Kill everything | `./slackrun kill --all [--yes]` |
+
+`runs` / `kill` talk to the running `slackrun start` via a per-user UNIX
+socket (`$XDG_RUNTIME_DIR/slackrun/slackrun.sock` on Linux, `$TMPDIR` on
+macOS). Set `SLACKRUN_ADMIN_SOCKET=/path/to/x.sock` to override, or
+`SLACKRUN_ADMIN_SOCKET=off` to disable the admin surface entirely. See
+`docs/security.md` for the trust boundary.
