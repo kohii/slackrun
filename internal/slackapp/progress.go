@@ -34,14 +34,21 @@ type StatusSetter interface {
 
 // ProgressHandle is the lifecycle every progress backend implements: start
 // (in the constructor), periodic keep-alive ticks, and a single terminal
-// Update or Remove call.
+// Update / Done / Remove call.
 type ProgressHandle interface {
 	// Channel is where the job's progress indicator lives, needed by callers
 	// that post follow-up content (multi-part replies, file uploads).
 	Channel() string
-	// Update settles the indicator with final text and stops ticking. Safe
-	// to call multiple times — only the first call has effect.
+	// Update settles the indicator with final text the user must see (error
+	// details, stdout, etc.) and stops ticking. Safe to call multiple times
+	// — only the first call has effect.
 	Update(text string) error
+	// Done settles the indicator for a successful completion that carries no
+	// content the user needs to see. For the message backend this leaves a
+	// "✅ Done" marker so the placeholder is not orphaned; for the
+	// assistant-status backend it just clears the status (no new post).
+	// Safe to call multiple times — only the first call has effect.
+	Done() error
 	// Remove clears the indicator without leaving any final text (used
 	// ahead of a file upload, which supplies its own content). Safe to call
 	// multiple times — only the first call has effect.
@@ -130,6 +137,10 @@ func (h *messageProgress) Update(text string) error {
 	return firstErr
 }
 
+func (h *messageProgress) Done() error {
+	return h.Update("✅ Done")
+}
+
 func (h *messageProgress) Remove() error {
 	var firstErr error
 	h.once.Do(func() {
@@ -195,6 +206,13 @@ func (h *assistantStatusProgress) Update(text string) error {
 		}
 	})
 	return firstErr
+}
+
+func (h *assistantStatusProgress) Done() error {
+	// Silent completion: clear the status but post nothing. This is what
+	// makes assistant_status distinct from the message backend — successful
+	// no-output runs vanish instead of leaving a "✅ Done" trail.
+	return h.Remove()
 }
 
 func (h *assistantStatusProgress) Remove() error {

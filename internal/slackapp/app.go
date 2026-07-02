@@ -381,9 +381,10 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 		_ = progress.Update(failureMessage(result))
 	case completionMarkDone:
 		// The child has already posted its own replies (or chose to stay
-		// silent). Settle the progress placeholder so no `⏳ Working…` is
-		// left orphaned.
-		_ = progress.Update("✅ Done")
+		// silent). Settle the progress indicator so no `⏳ Working…` is
+		// left orphaned — the assistant_status backend does this without
+		// posting anything new.
+		_ = progress.Done()
 	case completionPostStdout:
 		if err := PostCompletionReply(ctx, a.api, progress, threadTS, result.Stdout); err != nil {
 			logging.Error("post completion reply failed", logging.F("error", err), logging.F("rule", rule.Name))

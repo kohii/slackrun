@@ -93,6 +93,21 @@ func TestStartMessageProgress_UpdateRewritesPlaceholderOnce(t *testing.T) {
 	}
 }
 
+func TestStartMessageProgress_DoneOverwritesWithDoneMarker(t *testing.T) {
+	t.Parallel()
+	post := &fakeProgressPoster{}
+	h, err := StartMessageProgress(context.Background(), post, "C1", "100.1")
+	if err != nil {
+		t.Fatalf("StartMessageProgress: %v", err)
+	}
+	if err := h.Done(); err != nil {
+		t.Fatalf("Done: %v", err)
+	}
+	if len(post.updated) != 1 || post.updated[0] != "✅ Done" {
+		t.Fatalf("updated=%v, want a single \"✅ Done\" rewrite", post.updated)
+	}
+}
+
 func TestStartMessageProgress_RemoveDeletesPlaceholder(t *testing.T) {
 	t.Parallel()
 	post := &fakeProgressPoster{}
@@ -167,6 +182,27 @@ func TestStartAssistantStatusProgress_UpdatePostsMessageAndClearsStatus(t *testi
 	}
 	if len(post.posted) != 1 {
 		t.Fatalf("posted=%v, want no second post", post.posted)
+	}
+}
+
+func TestStartAssistantStatusProgress_DoneClearsStatusWithoutPosting(t *testing.T) {
+	t.Parallel()
+	post := &fakeProgressPoster{}
+	status := &fakeStatusSetter{}
+	h, err := StartAssistantStatusProgress(context.Background(), post, status, "C1", "100.1")
+	if err != nil {
+		t.Fatalf("StartAssistantStatusProgress: %v", err)
+	}
+
+	if err := h.Done(); err != nil {
+		t.Fatalf("Done: %v", err)
+	}
+	// The whole point of assistant_status: silent success = no new message.
+	if len(post.posted) != 0 {
+		t.Fatalf("posted=%v, want none (Done must not post a \"✅ Done\" message in this style)", post.posted)
+	}
+	if want := []string{"Working…", ""}; !equalStrings(status.statuses, want) {
+		t.Fatalf("statuses=%v, want %v", status.statuses, want)
 	}
 }
 

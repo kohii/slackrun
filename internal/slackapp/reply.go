@@ -30,7 +30,7 @@ type ReplyClient interface {
 func PostCompletionReply(ctx context.Context, c ReplyClient, progress ProgressHandle, threadTS, rawStdout string) error {
 	cleaned := util.SanitizeForSlack(rawStdout)
 	if cleaned == "" {
-		return progress.Update("✅ Done (no output)")
+		return progress.Done()
 	}
 	plan := util.PlanPost(cleaned)
 	switch plan.Kind {
@@ -38,7 +38,7 @@ func PostCompletionReply(ctx context.Context, c ReplyClient, progress ProgressHa
 		return progress.Update(plan.Text)
 	case util.PostKindMulti:
 		if len(plan.Parts) == 0 {
-			return progress.Update("✅ Done (empty)")
+			return progress.Done()
 		}
 		if err := progress.Update(plan.Parts[0]); err != nil {
 			return err

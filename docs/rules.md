@@ -285,8 +285,13 @@ the child's stdout after a successful exit.
 
 | Value | Effect on success | Effect on failure |
 |---|---|---|
-| `true` (default) | Progress message is overwritten with the child's stdout (chunked across multiple posts, or attached as a file when long). | Progress message becomes `❌ Failed: exit N` with a tail of stderr. |
-| `false` | Progress message is updated to `✅ Done`. stdout is discarded (only its byte count appears in the slackrun log). The child is expected to have posted its own replies via `slackrun post`. | Same as default — failures still surface (with a tail of stderr), so silent crashes stay visible. |
+| `true` (default) | Progress indicator is overwritten with the child's stdout (chunked across multiple posts, or attached as a file when long). Empty stdout settles the indicator silently. | Progress indicator becomes `❌ Failed: exit N` with a tail of stderr. |
+| `false` | Progress indicator is settled silently. stdout is discarded (only its byte count appears in the slackrun log). The child is expected to have posted its own replies via `slackrun post`. | Same as default — failures still surface (with a tail of stderr), so silent crashes stay visible. |
+
+"Settled silently" means different things per `progress_style`: with the
+default `message` style the placeholder is rewritten to `✅ Done` so it is
+not left orphaned; with `assistant_status` the transient indicator is just
+cleared and no new message is posted.
 
 Set `reply_with_stdout: false` when the child program (typically an LLM
 session) needs to control reply timing or format itself — e.g. when it
@@ -301,8 +306,8 @@ re-posted as a third reply.
 
 | Value | Mechanism | Effect |
 |---|---|---|
-| `message` (default) | `chat.postMessage` + `chat.update` | Posts a `⏳ Working…` placeholder message and rewrites it in place with elapsed time, then with the final result. |
-| `assistant_status` | `assistant.threads.setStatus` | Shows a transient "Working…" status indicator instead of a visible message. There is no placeholder to rewrite, so the final reply (stdout, `✅ Done`, failure text, etc.) is always posted as a new message, and the status is cleared once it lands. |
+| `message` (default) | `chat.postMessage` + `chat.update` | Posts a `⏳ Working…` placeholder message and rewrites it in place with elapsed time, then with the final result (stdout, `✅ Done`, failure text, etc.). |
+| `assistant_status` | `assistant.threads.setStatus` | Shows a transient "Working…" status indicator instead of a visible message. Final content the user must see (stdout, failure text) is posted as a new message and then the status is cleared. Silent completions (successful runs with no stdout, or `reply_with_stdout: false`) just clear the status — no `✅ Done` message is posted. |
 
 `assistant_status` requires the app's Slack token to carry the `chat:write`
 scope (already required for the `message` style) — no extra scope needed.
