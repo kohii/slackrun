@@ -343,6 +343,13 @@ func TestBuildStdinPayload_SlackrunHelpInjectsChildUsage(t *testing.T) {
 			t.Errorf("injected help missing %q:\n%s", want, out)
 		}
 	}
+	// The injected block is read by the child itself, so it must not
+	// describe rule-author gating the child has no control over — the
+	// mention of `expose_slack_token` belongs in `slackrun -h`, not in
+	// the child's prompt.
+	if strings.Contains(out, "expose_slack_token") {
+		t.Errorf("child-facing help must not mention expose_slack_token:\n%s", out)
+	}
 }
 
 func TestGenerateNonce_HexAndLength(t *testing.T) {

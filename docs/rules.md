@@ -251,11 +251,14 @@ part on "is there a thread?".
 
 ### `slackrun_help:`
 
-Emits the same child-CLI help block that `slackrun -h` prints — both the
-write side (`post` / `react` / `upload`) and the read side (`history` /
+Emits an agent-facing reference of the child-side CLI — both the write
+side (`post` / `react` / `upload`) and the read side (`history` /
 `replies` / `reactions` / `user` / `usergroups`) — so an LLM child can
-learn how to interact with Slack from its prompt. Plain text, no wrapper
-tags — it is author-trusted documentation, not Slack-derived data.
+learn how to interact with Slack from its prompt. Written in second
+person; the pre-set `SLACKRUN_*` env context is called out inline so the
+child knows the default target. Plain text, no wrapper tags — it is
+author-trusted documentation, not Slack-derived data. The same subcommand
+table appears in `slackrun -h`, wrapped there in operator-facing framing.
 
 ```yaml
 - slackrun_help: {}
