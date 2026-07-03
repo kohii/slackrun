@@ -104,15 +104,17 @@ func TestRunDryRun_Match(t *testing.T) {
 	if len(cmd) != 1 || cmd[0] != "echo" {
 		t.Fatalf("command=%v", cmd)
 	}
-	// New stdin uses trigger_message: { } so the rendered stdin is wrapped
-	// in <UNTRUSTED_SLACK_MESSAGE_…> tags and contains the keyword-stripped
-	// body ("world", since the matched rule is the keyword-less default and
-	// the first non-mention token is "hello").
+	// The matched rule is a gated `app_mention` (allowed_user_ids=[U01OK]), so
+	// the trigger message is treated as trusted and wrapped in
+	// <slack_message_…> — no `untrusted` marker, no note attribute.
 	if s, _ := got["stdin"].(string); !strings.Contains(s, "hello world") {
 		t.Fatalf("stdin missing body: %q", s)
 	}
-	if s, _ := got["stdin"].(string); !strings.Contains(s, "UNTRUSTED_SLACK_MESSAGE") {
-		t.Fatalf("stdin missing wrapper: %q", s)
+	if s, _ := got["stdin"].(string); !strings.Contains(s, "<slack_message_") {
+		t.Fatalf("stdin missing trusted wrapper: %q", s)
+	}
+	if s, _ := got["stdin"].(string); strings.Contains(s, "untrusted_slack_message") {
+		t.Fatalf("gated app_mention must not use the untrusted wrapper: %q", s)
 	}
 }
 

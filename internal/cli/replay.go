@@ -210,12 +210,13 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		Extract:   res.Extract,
 	}
 	stdinPayload := slackapp.BuildStdinPayload(slackapp.StdinBuildInput{
-		Parts:  rule.Action.Stdin,
-		Vars:   vars,
-		Event:  ev,
-		Match:  res,
-		Thread: thread,
-		Nonce:  "REPLAYNC",
+		Parts:                 rule.Action.Stdin,
+		Vars:                  vars,
+		Event:                 ev,
+		Match:                 res,
+		Thread:                thread,
+		Nonce:                 "REPLAYNC",
+		TriggerMessageTrusted: slackapp.TriggerMessageTrusted(rule.Trigger, allowedIDs),
 	})
 
 	// SLACKRUN_* env: real or dummy per --real-slack-context.

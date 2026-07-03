@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -363,14 +364,15 @@ func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dis
 	nonce := generateNonce()
 	timeout := time.Duration(rule.Action.TimeoutMs) * time.Millisecond
 	stdinPayload := BuildStdinPayload(StdinBuildInput{
-		Parts:      rule.Action.Stdin,
-		Vars:       vars,
-		Event:      ev,
-		Match:      res,
-		Thread:     fetchedThread,
-		Nonce:      nonce,
-		SelfUserID: a.selfUserID,
-		SelfBotID:  a.selfBotID,
+		Parts:                 rule.Action.Stdin,
+		Vars:                  vars,
+		Event:                 ev,
+		Match:                 res,
+		Thread:                fetchedThread,
+		Nonce:                 nonce,
+		SelfUserID:            a.selfUserID,
+		SelfBotID:             a.selfBotID,
+		TriggerMessageTrusted: TriggerMessageTrusted(rule.Trigger, a.allowedUserIDs),
 	})
 	logging.Info("job start",
 		logging.F("rule", rule.Name),
@@ -750,6 +752,31 @@ func needsPermalink(parts []config.StdinPart) bool {
 	return false
 }
 
+// TriggerMessageTrusted reports whether the trigger sender is authorized at
+// the rule level, and therefore whether the `trigger_message:` part should
+// be rendered inside <slack_message_…> instead of the untrusted wrapper.
+//
+// Only `app_mention` triggers with a populated top-level allowed_user_ids
+// list qualify. Two rules apply:
+//
+//   - allowed_user_ids gates `app_mention` senders. schema validation
+//     requires it to be non-empty whenever any `app_mention` rule exists,
+//     and dispatch drops mentions from unlisted users before this function
+//     is called. So on the runtime path, len(allowedUserIDs) > 0 is
+//     effectively guaranteed for `app_mention` — the check here is
+//     defense-in-depth, and also lets replay/dryrun call sites reuse the
+//     helper without repeating the invariant.
+//   - `type: message` is never trusted, even when narrowed by
+//     `trigger.from.user_ids`. Message events flow from a mix of humans,
+//     integrations, and webhooks whose identity we do not verify the same
+//     way `app_mention` does; the conservative default is to keep them
+//     wrapped as untrusted data. If you want a `type: message` sender to
+//     drive prompts as trusted context, route it through an `app_mention`
+//     rule instead.
+func TriggerMessageTrusted(trig config.Trigger, allowedUserIDs []string) bool {
+	return trig.Type == config.TriggerTypeAppMention && len(allowedUserIDs) > 0
+}
+
 // threadFetchPolicy returns the `on_fetch_error` policy for the rule's
 // (at most one) thread part. Default is OnFetchErrorFail; absence of a
 // thread part means no policy is needed but we still return Fail so the
@@ -777,6 +804,14 @@ type StdinBuildInput struct {
 	Nonce      string
 	SelfUserID string
 	SelfBotID  string
+	// TriggerMessageTrusted flags whether the triggering sender is authorized
+	// at the rule level. When true, the `trigger_message:` part is emitted
+	// inside <slack_message_…> (no untrusted marker); when false the
+	// <untrusted_slack_message_… note="…"> wrapper is used instead. Threads
+	// are unconditionally untrusted and ignore this field. Callers compute
+	// the flag at the trust boundary (`app_mention` gated by a non-empty
+	// allowed_user_ids) so `renderStdinPart` stays policy-free.
+	TriggerMessageTrusted bool
 }
 
 // BuildStdinPayload concatenates the rule's stdin parts into a single byte
@@ -806,11 +841,11 @@ func renderStdinPart(p config.StdinPart, in StdinBuildInput) string {
 			spec = &config.TriggerMessageSpec{}
 		}
 		msg := buildTriggerMessage(in.Event, in.Match, spec.Content, in.SelfUserID, in.SelfBotID)
-		body := slackthread.RenderTriggerMessage(msg, slackthread.RenderOptions{
+		body := slackthread.RenderTriggerMessage(msg, slackthread.TriggerRenderOptions{
 			Nonce:             in.Nonce,
-			Format:            slackthread.FormatText,
 			IncludeTimestamps: spec.IncludeTimestamps,
 			Files:             slackthread.FilesMode(spec.Files),
+			Trusted:           in.TriggerMessageTrusted,
 		})
 		return renderPartWithHeading(spec.Heading, body)
 
@@ -823,7 +858,7 @@ func renderStdinPart(p config.StdinPart, in StdinBuildInput) string {
 		if !spec.IncludeTriggeringMessage && in.Event.TS != "" {
 			msgs = excludeByTS(msgs, in.Event.TS)
 		}
-		body := slackthread.RenderThread(msgs, slackthread.RenderOptions{
+		body := slackthread.RenderThread(msgs, slackthread.ThreadRenderOptions{
 			Nonce:             in.Nonce,
 			Format:            slackthread.Format(spec.Format),
 			MaxMessages:       spec.MaxMessages,
@@ -954,14 +989,21 @@ func firstNonEmpty(values ...string) string {
 }
 
 // generateNonce returns 8 hex chars (4 random bytes). Used as the suffix on
-// <UNTRUSTED_SLACK_*> tags so a Slack body cannot forge a closing tag.
+// the slack wrapper tags so a Slack body cannot forge a closing tag.
+//
+// crypto/rand.Read essentially never fails in practice, but if it does we
+// still need *some* per-spawn variation so a Slack body cannot preload a
+// known suffix. Falling back to nanoseconds + PID mixed with a fixed
+// constant gives dynamic (though non-crypto) bytes without panicking the
+// spawn.
 func generateNonce() string {
 	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		// crypto/rand failure is exotic enough that we'd rather emit a
-		// constant suffix than panic the spawn. The marker still differs
-		// from the bare base tag name.
-		return "fallback"
+	if _, err := rand.Read(b); err == nil {
+		return hex.EncodeToString(b)
 	}
+	h := uint64(time.Now().UnixNano())
+	h ^= h >> 32
+	h ^= uint64(os.Getpid()) * 0x9e3779b97f4a7c15
+	b[0], b[1], b[2], b[3] = byte(h>>24), byte(h>>16), byte(h>>8), byte(h)
 	return hex.EncodeToString(b)
 }

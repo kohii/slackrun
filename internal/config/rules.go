@@ -260,10 +260,12 @@ const (
 	// {{event.*}} metadata variable references.
 	PartKindText
 	// PartKindTriggerMessage renders the message that fired the rule, wrapped
-	// in <UNTRUSTED_SLACK_MESSAGE_<nonce>> tags. At most one per rule.
+	// in a nonce-tagged <slack_message_…> or <untrusted_slack_message_…>
+	// pair depending on sender trust. At most one per rule.
 	PartKindTriggerMessage
 	// PartKindThread renders the thread the trigger lives in, wrapped in
-	// <UNTRUSTED_SLACK_THREAD_<nonce>> tags. At most one per rule.
+	// <untrusted_slack_thread_<nonce>> tags (always untrusted — other
+	// participants' messages are included). At most one per rule.
 	PartKindThread
 	// PartKindSlackrunHelp injects clidoc.ChildUsage — the static help for
 	// the child-facing subcommands (post / react / upload plus the

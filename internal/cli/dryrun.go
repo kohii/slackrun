@@ -11,6 +11,7 @@ import (
 	"github.com/kohii/slackrun/internal/clidoc"
 	"github.com/kohii/slackrun/internal/config"
 	"github.com/kohii/slackrun/internal/dispatch"
+	"github.com/kohii/slackrun/internal/slackapp"
 	"github.com/kohii/slackrun/internal/slackthread"
 )
 
@@ -153,7 +154,8 @@ func RunDryRun(args []string, stdout, stderr io.Writer) int {
 		// include_triggering_message visible we synthesize a single-message
 		// "thread" from the event payload when the event has a TS.
 		if parts := res.Rule.Action.Stdin; parts != nil {
-			report["stdin"] = renderStdinPreview(parts, vars, dispEv, res)
+			trusted := slackapp.TriggerMessageTrusted(res.Rule.Trigger, allowedIDs)
+			report["stdin"] = renderStdinPreview(parts, vars, dispEv, res, trusted)
 			report["thread_fetch"] = stdinUsesThread(parts)
 		}
 	} else if res.Kind == dispatch.MatchKindNoMatch {
@@ -186,17 +188,17 @@ func matchKindName(k dispatch.MatchKind) string {
 // mention collapses the part exactly as it would in production. The same
 // between-parts newline rule as BuildStdinPayload applies here so the
 // preview matches what the child actually sees.
-func renderStdinPreview(parts []config.StdinPart, vars dispatch.TemplateVars, ev dispatch.IncomingEvent, res dispatch.MatchResult) string {
+func renderStdinPreview(parts []config.StdinPart, vars dispatch.TemplateVars, ev dispatch.IncomingEvent, res dispatch.MatchResult, trustedTrigger bool) string {
 	thread := previewThread(ev)
 	var sb strings.Builder
 	for _, p := range parts {
-		chunk := renderPartPreview(p, vars, ev, res, thread)
+		chunk := renderPartPreview(p, vars, ev, res, thread, trustedTrigger)
 		appendPart(&sb, chunk)
 	}
 	return sb.String()
 }
 
-func renderPartPreview(p config.StdinPart, vars dispatch.TemplateVars, ev dispatch.IncomingEvent, res dispatch.MatchResult, thread []slackthread.Message) string {
+func renderPartPreview(p config.StdinPart, vars dispatch.TemplateVars, ev dispatch.IncomingEvent, res dispatch.MatchResult, thread []slackthread.Message, trustedTrigger bool) string {
 	switch p.Kind {
 	case config.PartKindText:
 		return dispatch.ExpandTemplate(p.Text, vars)
@@ -207,11 +209,11 @@ func renderPartPreview(p config.StdinPart, vars dispatch.TemplateVars, ev dispat
 			spec = &config.TriggerMessageSpec{}
 		}
 		msg := previewTriggerMessage(ev, res, spec.Content)
-		body := slackthread.RenderTriggerMessage(msg, slackthread.RenderOptions{
+		body := slackthread.RenderTriggerMessage(msg, slackthread.TriggerRenderOptions{
 			Nonce:             "preview",
-			Format:            slackthread.FormatText,
 			IncludeTimestamps: spec.IncludeTimestamps,
 			Files:             slackthread.FilesMode(spec.Files),
+			Trusted:           trustedTrigger,
 		})
 		return renderPartWithHeading(spec.Heading, body)
 
@@ -224,7 +226,7 @@ func renderPartPreview(p config.StdinPart, vars dispatch.TemplateVars, ev dispat
 		if !spec.IncludeTriggeringMessage && ev.TS != "" {
 			msgs = filterOutTS(msgs, ev.TS)
 		}
-		body := slackthread.RenderThread(msgs, slackthread.RenderOptions{
+		body := slackthread.RenderThread(msgs, slackthread.ThreadRenderOptions{
 			Nonce:             "preview",
 			Format:            slackthread.Format(spec.Format),
 			MaxMessages:       spec.MaxMessages,
