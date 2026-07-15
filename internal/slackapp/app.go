@@ -41,6 +41,11 @@ type App struct {
 	selfUserID     string
 	selfBotID      string
 
+	// backfillers is keyed by channel and is nil when BACKFILL_INTERVAL_MS=0.
+	// Each poller acts as a backstop for Socket Mode losses (silent dead
+	// connections, dropped envelopes); Dedupe absorbs the overlap.
+	backfillers map[string]*backfiller
+
 	runs *runmgr.Manager
 }
 
@@ -101,6 +106,17 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		selfBotID:      authResp.BotID,
 		runs:           runmgr.New(),
 	}
+	if opts.Env.BackfillIntervalMs > 0 {
+		interval := time.Duration(opts.Env.BackfillIntervalMs) * time.Millisecond
+		lookback := time.Duration(opts.Env.BackfillLookbackMs) * time.Millisecond
+		channels := uniqueMessageChannels(opts.Rules)
+		if len(channels) > 0 {
+			app.backfillers = make(map[string]*backfiller, len(channels))
+			for _, ch := range channels {
+				app.backfillers[ch] = newBackfiller(ch, interval, lookback, api, app.dispatchBackfillMessage)
+			}
+		}
+	}
 	logging.Info("bot ready",
 		logging.F("team", authResp.Team),
 		logging.F("user", authResp.User),
@@ -142,6 +158,19 @@ func (a *App) Run(ctx context.Context, admin AdminServer) error {
 		defer loopWG.Done()
 		a.eventLoop(runCtx)
 	}()
+
+	for ch, b := range a.backfillers {
+		loopWG.Add(1)
+		ch, b := ch, b
+		go func() {
+			defer loopWG.Done()
+			logging.Info("backfill started",
+				logging.F("channel", ch),
+				logging.F("intervalMs", b.interval.Milliseconds()),
+				logging.F("lookbackMs", b.lookback.Milliseconds()))
+			b.Run(runCtx)
+		}()
+	}
 
 	runErr := a.sm.RunContext(runCtx)
 	cancel()
@@ -205,10 +234,21 @@ func (a *App) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent)
 	case *slackevents.AppMentionEvent:
 		a.handleIncoming(ctx, fromAppMention(inner))
 	case *slackevents.MessageEvent:
-		a.handleIncoming(ctx, fromMessage(inner))
+		ev := fromMessage(inner)
+		if b := a.backfillers[ev.Channel]; b != nil {
+			b.Observe(ev.TS)
+		}
+		a.handleIncoming(ctx, ev)
 	default:
 		logging.Debug("unhandled inner event", logging.F("type", e.InnerEvent.Type))
 	}
+}
+
+// dispatchBackfillMessage feeds one history-fetched message through the same
+// pipeline as a live Socket Mode delivery. Dedupe rejects anything Socket
+// Mode already handled, so double-delivery collapses to one run.
+func (a *App) dispatchBackfillMessage(ctx context.Context, m slack.Message, channel string) {
+	a.handleIncoming(ctx, IncomingEventFromMessage(m, channel))
 }
 
 func (a *App) handleIncoming(ctx context.Context, ev dispatch.IncomingEvent) {

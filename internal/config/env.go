@@ -16,6 +16,8 @@ import (
 const (
 	defaultMaxConcurrent       = 5
 	defaultMinEventAgeMsAtBoot = 300_000
+	defaultBackfillIntervalMs  = 60_000
+	defaultBackfillLookbackMs  = 600_000
 	defaultLogLevel            = "info"
 
 	defaultEnvPath        = "~/.config/slackrun/.env"
@@ -30,6 +32,14 @@ type AppEnv struct {
 	ConfigPath           string // resolved path to rules.yaml
 	MaxConcurrent        int
 	MinEventAgeMsAtBoot  int
+	// BackfillIntervalMs configures how often each type:message channel is
+	// polled via conversations.history as a backstop for Socket Mode losses
+	// (silent dead connections, dropped envelopes). 0 disables backfill.
+	BackfillIntervalMs int
+	// BackfillLookbackMs bounds the first poll's window when no live event
+	// has been seen yet on that channel — keeps the fetch small after a
+	// long outage.
+	BackfillLookbackMs   int
 	LogLevel             string // debug | info | warn | error
 	AllowRawEventTextLog bool
 }
@@ -113,6 +123,16 @@ func ParseEnv() (AppEnv, error) {
 		errs = append(errs, err.Error())
 	}
 
+	backfillInterval, err := parseIntDefault("BACKFILL_INTERVAL_MS", defaultBackfillIntervalMs, func(n int) bool { return n >= 0 }, "must be >= 0")
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	backfillLookback, err := parseIntDefault("BACKFILL_LOOKBACK_MS", defaultBackfillLookbackMs, func(n int) bool { return n > 0 }, "must be > 0")
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+
 	level := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_LEVEL")))
 	if level == "" {
 		level = defaultLogLevel
@@ -140,6 +160,8 @@ func ParseEnv() (AppEnv, error) {
 		ConfigPath:           ExpandHome(cfg),
 		MaxConcurrent:        maxConc,
 		MinEventAgeMsAtBoot:  minAge,
+		BackfillIntervalMs:   backfillInterval,
+		BackfillLookbackMs:   backfillLookback,
 		LogLevel:             level,
 		AllowRawEventTextLog: allowRaw,
 	}, nil
