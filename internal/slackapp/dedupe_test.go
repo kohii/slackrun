@@ -39,6 +39,31 @@ func TestDedupe_TooOldRejectedAtBoot(t *testing.T) {
 	}
 }
 
+func TestDedupe_CatchupIgnoresTooOldButStillDedupes(t *testing.T) {
+	t.Parallel()
+	boot := time.Now()
+	d := NewDedupe(DedupeOptions{
+		TTL:            5 * time.Minute,
+		BootTime:       boot,
+		MinAgeFromBoot: 5 * time.Minute,
+		Now:            func() time.Time { return boot },
+	})
+	stale := timeToTS(boot.Add(-6 * time.Hour))
+
+	// Live delivery of a stale event is refused as TooOld.
+	if got := d.Decide("C01", stale); got != DedupeTooOld {
+		t.Fatalf("Decide: got %v; want DedupeTooOld", got)
+	}
+	// Catchup accepts the same stale ts on first sight.
+	if got := d.DecideCatchup("C01", stale); got != DedupeAccept {
+		t.Fatalf("DecideCatchup first: got %v; want DedupeAccept", got)
+	}
+	// Second sight — duplicate detection still active on the catchup path.
+	if got := d.DecideCatchup("C01", stale); got != DedupeDuplicate {
+		t.Fatalf("DecideCatchup second: got %v; want DedupeDuplicate", got)
+	}
+}
+
 func TestDedupe_GCAfterTTL(t *testing.T) {
 	t.Parallel()
 	clock := time.Unix(1_700_000_000, 0)

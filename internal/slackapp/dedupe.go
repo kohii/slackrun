@@ -26,10 +26,11 @@ type DedupeOptions struct {
 	Now func() time.Time
 }
 
-// Dedupe rejects (channel, ts) pairs we have already handled, and (at boot)
-// drops events older than `bootTime - minAgeFromBoot`. The latter is the
-// Slack-replay defense for fresh starts: Socket Mode may replay recent
-// events, but we are not interested in stale alerts at startup.
+// Dedupe rejects (channel, ts) pairs we have already handled, and (for live
+// deliveries only) drops events older than `bootTime - minAgeFromBoot`. The
+// latter is the Slack-replay defense for fresh starts: Socket Mode may replay
+// recent events, but we are not interested in stale alerts at startup.
+// Intentional catchup paths (see DecideCatchup) bypass the age cutoff.
 //
 // Concurrent-safe.
 type Dedupe struct {
@@ -50,19 +51,34 @@ func NewDedupe(opts DedupeOptions) *Dedupe {
 }
 
 // Decide records the (channel, ts) pair if we have not seen it within the
-// TTL window. Slack timestamps are decimal seconds with µs precision —
-// "1719456789.012345".
+// TTL window. Applies the boot-time TooOld cutoff so stale replays from
+// Socket Mode do not fire rules at startup. Slack timestamps are decimal
+// seconds with µs precision — "1719456789.012345".
 func (d *Dedupe) Decide(channel, ts string) DedupeDecision {
+	return d.decide(channel, ts, true)
+}
+
+// DecideCatchup is the entry point for events pulled by an intentional
+// backfill (e.g. the conversations.history poller). Skips the TooOld
+// cutoff — catchup is by definition our willingness to process stale
+// events — but still enforces duplicate suppression.
+func (d *Dedupe) DecideCatchup(channel, ts string) DedupeDecision {
+	return d.decide(channel, ts, false)
+}
+
+func (d *Dedupe) decide(channel, ts string, enforceTooOld bool) DedupeDecision {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	now := d.opts.Now()
 	d.gcLocked(now)
 
-	if eventTime, ok := parseSlackTS(ts); ok {
-		cutoff := d.opts.BootTime.Add(-d.opts.MinAgeFromBoot)
-		if eventTime.Before(cutoff) {
-			return DedupeTooOld
+	if enforceTooOld {
+		if eventTime, ok := parseSlackTS(ts); ok {
+			cutoff := d.opts.BootTime.Add(-d.opts.MinAgeFromBoot)
+			if eventTime.Before(cutoff) {
+				return DedupeTooOld
+			}
 		}
 	}
 

@@ -229,16 +229,27 @@ func (a *App) handleEvent(ctx context.Context, evt socketmode.Event) {
 	}
 }
 
+// incomingSource distinguishes a live Socket Mode delivery from a catchup
+// dispatch (conversations.history poller). Only the live path enforces the
+// boot-time TooOld cutoff; backfill is by definition our willingness to
+// process older events.
+type incomingSource int
+
+const (
+	sourceLive incomingSource = iota
+	sourceBackfill
+)
+
 func (a *App) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent) {
 	switch inner := e.InnerEvent.Data.(type) {
 	case *slackevents.AppMentionEvent:
-		a.handleIncoming(ctx, fromAppMention(inner))
+		a.handleIncoming(ctx, fromAppMention(inner), sourceLive)
 	case *slackevents.MessageEvent:
 		ev := fromMessage(inner)
 		if b := a.backfillers[ev.Channel]; b != nil {
 			b.Observe(ev.TS)
 		}
-		a.handleIncoming(ctx, ev)
+		a.handleIncoming(ctx, ev, sourceLive)
 	default:
 		logging.Debug("unhandled inner event", logging.F("type", e.InnerEvent.Type))
 	}
@@ -248,10 +259,10 @@ func (a *App) handleEventsAPI(ctx context.Context, e slackevents.EventsAPIEvent)
 // pipeline as a live Socket Mode delivery. Dedupe rejects anything Socket
 // Mode already handled, so double-delivery collapses to one run.
 func (a *App) dispatchBackfillMessage(ctx context.Context, m slack.Message, channel string) {
-	a.handleIncoming(ctx, IncomingEventFromMessage(m, channel))
+	a.handleIncoming(ctx, IncomingEventFromMessage(m, channel), sourceBackfill)
 }
 
-func (a *App) handleIncoming(ctx context.Context, ev dispatch.IncomingEvent) {
+func (a *App) handleIncoming(ctx context.Context, ev dispatch.IncomingEvent, source incomingSource) {
 	res := dispatch.Match(ev, a.rules, dispatch.MatcherContext{
 		SelfUserID:     a.selfUserID,
 		SelfBotID:      a.selfBotID,
@@ -270,7 +281,13 @@ func (a *App) handleIncoming(ctx context.Context, ev dispatch.IncomingEvent) {
 	}
 
 	if ev.Channel != "" && ev.TS != "" {
-		switch a.dedupe.Decide(ev.Channel, ev.TS) {
+		var decision DedupeDecision
+		if source == sourceBackfill {
+			decision = a.dedupe.DecideCatchup(ev.Channel, ev.TS)
+		} else {
+			decision = a.dedupe.Decide(ev.Channel, ev.TS)
+		}
+		switch decision {
 		case DedupeDuplicate:
 			logging.Info("dispatcher dedupe",
 				logging.F("kind", "duplicate"),
