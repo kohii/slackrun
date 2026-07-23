@@ -33,5 +33,5 @@ func slackClientFromEnv() (*slack.Client, error) {
 	if tok == "" {
 		return nil, errNoSlackToken
 	}
-	return slack.New(tok), nil
+	return slack.New(tok, slack.OptionHTTPClient(httpClient())), nil
 }

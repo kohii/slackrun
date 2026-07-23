@@ -146,7 +146,7 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "SLACK_BOT_TOKEN is not set; needed to fetch the message. Load ~/.config/slackrun/.env first.")
 		return replayExitFetchFail
 	}
-	client := slack.New(tok)
+	client := slack.New(tok, slack.OptionHTTPClient(httpClient()))
 
 	msg, err := fetchMessage(client, channel, ts, threadTS)
 	if err != nil {

@@ -48,7 +48,7 @@ func RunFile(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, errNoSlackToken)
 		return 1
 	}
-	return runFileWith(args, stdout, stderr, slack.New(tok), httpFileDownloader{}, tok)
+	return runFileWith(args, stdout, stderr, slack.New(tok, slack.OptionHTTPClient(httpClient())), httpFileDownloader{}, tok)
 }
 
 func runFileWith(args []string, stdout, stderr io.Writer, client FileClient, dl FileDownloader, token string) int {
@@ -123,7 +123,7 @@ func runFileWith(args []string, stdout, stderr io.Writer, client FileClient, dl 
 // would send.
 type httpFileDownloader struct{}
 
-var fileHTTPClient = &http.Client{Timeout: fileDownloadTimeout}
+var fileHTTPClient = &http.Client{Timeout: fileDownloadTimeout, Transport: httpTransport()}
 
 func (httpFileDownloader) Download(ctx context.Context, url, token string, w io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
