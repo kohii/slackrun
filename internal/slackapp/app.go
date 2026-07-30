@@ -47,11 +47,26 @@ type App struct {
 	backfillers map[string]*backfiller
 
 	runs *runmgr.Manager
+
+	restart  restartGate
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // Runs exposes the run manager so the admin HTTP layer (internal/adminapi)
 // and CLI wiring can share the same in-flight registry as the dispatcher.
 func (a *App) Runs() *runmgr.Manager { return a.runs }
+
+// PrepareRestart atomically quiesces dispatch when no accepted dispatch is
+// active. A busy result leaves admission open; success is idempotent.
+func (a *App) PrepareRestart() (active int, ready bool) {
+	return a.restart.prepare()
+}
+
+// RequestStop asks Run to exit cleanly after restart preparation succeeds.
+func (a *App) RequestStop() {
+	a.stopOnce.Do(func() { close(a.stop) })
+}
 
 // Options configures a new App. BootTime defaults to time.Now if zero.
 type Options struct {
@@ -105,6 +120,7 @@ func New(ctx context.Context, opts Options) (*App, error) {
 		selfUserID:     authResp.UserID,
 		selfBotID:      authResp.BotID,
 		runs:           runmgr.New(),
+		stop:           make(chan struct{}),
 	}
 	if opts.Env.BackfillIntervalMs > 0 {
 		interval := time.Duration(opts.Env.BackfillIntervalMs) * time.Millisecond
@@ -153,6 +169,13 @@ func (a *App) Run(ctx context.Context, admin AdminServer) error {
 	}
 
 	var loopWG sync.WaitGroup
+	go func() {
+		select {
+		case <-runCtx.Done():
+		case <-a.stop:
+			cancel()
+		}
+	}()
 	loopWG.Add(1)
 	go func() {
 		defer loopWG.Done()
@@ -186,6 +209,11 @@ func (a *App) Run(ctx context.Context, admin AdminServer) error {
 		stopCancel()
 	}
 	a.runs.Shutdown(context.Background(), "⚠️ Bot stopped", 7*time.Second)
+	select {
+	case <-a.stop:
+		return nil
+	default:
+	}
 	return runErr
 }
 
@@ -215,6 +243,13 @@ func (a *App) handleEvent(ctx context.Context, evt socketmode.Event) {
 		logging.Error("socketmode invalid auth (check SLACK_APP_TOKEN)")
 	case socketmode.EventTypeHello:
 	case socketmode.EventTypeEventsAPI:
+		release, ok := a.restart.admit()
+		if !ok {
+			logging.Info("socketmode event deferred for restart")
+			return
+		}
+		defer release()
+
 		eventsAPI, ok := evt.Data.(slackevents.EventsAPIEvent)
 		if !ok {
 			logging.Warn("unexpected events-api payload", logging.F("data", fmt.Sprintf("%T", evt.Data)))
@@ -305,7 +340,15 @@ func (a *App) handleIncoming(ctx context.Context, ev dispatch.IncomingEvent, sou
 		}
 	}
 
-	go a.runMatched(ctx, ev, res)
+	release, ok := a.restart.admit()
+	if !ok {
+		logging.Info("dispatcher quiescing", logging.F("rule", res.Rule.Name))
+		return
+	}
+	go func() {
+		defer release()
+		a.runMatched(ctx, ev, res)
+	}()
 }
 
 func (a *App) runMatched(ctx context.Context, ev dispatch.IncomingEvent, res dispatch.MatchResult) {

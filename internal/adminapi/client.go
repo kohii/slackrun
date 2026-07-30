@@ -93,6 +93,20 @@ func (c *Client) KillAll(ctx context.Context, reason string) (KillAllResponse, e
 	return out, nil
 }
 
+// PrepareRestart atomically closes dispatch admission and stops an idle daemon.
+// expectedPID prevents a supervisor from stopping a different daemon.
+func (c *Client) PrepareRestart(ctx context.Context, expectedPID int) (PrepareRestartResponse, error) {
+	body := map[string]any{}
+	if expectedPID > 0 {
+		body["expected_pid"] = expectedPID
+	}
+	var out PrepareRestartResponse
+	if err := c.post(ctx, "/restart/prepare", body, &out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
 // Health returns liveness info from the daemon.
 func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
 	var out HealthResponse
@@ -131,6 +145,12 @@ type KillResponse struct {
 type KillAllResponse struct {
 	Killed    bool     `json:"killed"`
 	KilledIDs []string `json:"killed_ids"`
+}
+
+// PrepareRestartResponse is returned after dispatch admission is closed.
+type PrepareRestartResponse struct {
+	Prepared bool `json:"prepared"`
+	PID      int  `json:"pid"`
 }
 
 // HealthResponse mirrors the /v1/health payload.

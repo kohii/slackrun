@@ -1,16 +1,18 @@
 // Package adminapi exposes an HTTP-over-UDS admin surface for a running
-// slackrun daemon: list in-flight runs and kill them. The socket is
-// per-user (0600, path in $XDG_RUNTIME_DIR or $TMPDIR); the design
-// deliberately does *not* speak TCP. Trust boundary: any process running
-// as the same OS user can connect.
+// slackrun daemon: inspect runs, control them, and prepare safe restarts.
+// The socket is per-user (0600, path in $XDG_RUNTIME_DIR or $TMPDIR); the
+// design deliberately does *not* speak TCP. Trust boundary: any process
+// running as the same OS user can connect.
 package adminapi
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -25,14 +27,22 @@ const APIVersion = "v1"
 
 // bootTime is used by /v1/health. Populated by New.
 type Server struct {
-	runs    *runmgr.Manager
-	http    *http.Server
-	listen  net.Listener
-	sockPth string
-	boot    time.Time
-	version string
+	runs              *runmgr.Manager
+	http              *http.Server
+	listen            net.Listener
+	sockPth           string
+	boot              time.Time
+	version           string
+	restart           RestartPreparer
+	onRestartPrepared func()
+	pid               int
 
 	stopOnce sync.Once
+}
+
+// RestartPreparer atomically closes dispatch admission when the app is idle.
+type RestartPreparer interface {
+	PrepareRestart() (active int, ready bool)
 }
 
 // Options configures the admin server.
@@ -41,14 +51,27 @@ type Options struct {
 	Runs *runmgr.Manager
 	// Version is surfaced by /v1/health so clients can pin behaviour.
 	Version string
+	// Restart handles atomic dispatch quiescing. Optional.
+	Restart RestartPreparer
+	// OnRestartPrepared starts clean daemon shutdown after the response flushes.
+	OnRestartPrepared func()
+	// PID identifies the daemon for supervisor matching. Defaults to os.Getpid.
+	PID int
 }
 
 // New returns a Server. It does not open the socket; call Start.
 func New(opts Options) *Server {
+	pid := opts.PID
+	if pid == 0 {
+		pid = os.Getpid()
+	}
 	return &Server{
-		runs:    opts.Runs,
-		boot:    time.Now(),
-		version: opts.Version,
+		runs:              opts.Runs,
+		boot:              time.Now(),
+		version:           opts.Version,
+		restart:           opts.Restart,
+		onRestartPrepared: opts.OnRestartPrepared,
+		pid:               pid,
 	}
 }
 
@@ -111,8 +134,47 @@ func (s *Server) SocketPath() string { return s.sockPth }
 func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/"+APIVersion+"/health", s.handleHealth)
 	mux.HandleFunc("/"+APIVersion+"/runs", s.handleRuns)
+	mux.HandleFunc("/"+APIVersion+"/restart/prepare", s.handlePrepareRestart)
 	// Sub-paths under /v1/runs/ (single kill, kill-all).
 	mux.HandleFunc("/"+APIVersion+"/runs/", s.handleRunsSub)
+}
+
+func (s *Server) handlePrepareRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST only")
+		return
+	}
+	if s.restart == nil || s.onRestartPrepared == nil {
+		writeErr(w, http.StatusServiceUnavailable, "restart_unavailable", "restart preparation is unavailable")
+		return
+	}
+	var body prepareRestartRequest
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, http.StatusBadRequest, "bad_json", err.Error())
+			return
+		}
+	}
+	if body.ExpectedPID > 0 && body.ExpectedPID != s.pid {
+		writeErr(w, http.StatusConflict, "daemon_mismatch",
+			fmt.Sprintf("connected daemon pid %d does not match expected pid %d", s.pid, body.ExpectedPID))
+		return
+	}
+	active, ready := s.restart.PrepareRestart()
+	if !ready {
+		writeErr(w, http.StatusConflict, "dispatches_active",
+			fmt.Sprintf("%d dispatch(es) active; restart not prepared", active))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"prepared": true, "pid": s.pid})
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	s.onRestartPrepared()
+}
+
+type prepareRestartRequest struct {
+	ExpectedPID int `json:"expected_pid,omitempty"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

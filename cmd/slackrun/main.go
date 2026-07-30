@@ -28,6 +28,8 @@ func main() {
 		os.Exit(cli.RunRuns(os.Args[2:], os.Stdout, os.Stderr))
 	case "kill":
 		os.Exit(cli.RunKill(os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	case "prepare-restart":
+		os.Exit(cli.RunPrepareRestart(os.Args[2:], os.Stdout, os.Stderr))
 	case "check":
 		os.Exit(cli.RunCheck(os.Args[2:], os.Stdout, os.Stderr))
 	case "dry-run":

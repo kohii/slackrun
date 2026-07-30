@@ -16,10 +16,11 @@ import (
 )
 
 // RunRuns lists in-flight runs in the daemon. Exit codes:
-//   0 success (empty table on no runs)
-//   1 API error
-//   2 usage
-//   3 daemon unreachable (start not running)
+//
+//	0 success (empty table on no runs)
+//	1 API error
+//	2 usage
+//	3 daemon unreachable (start not running)
 //
 // Usage:
 //
@@ -83,7 +84,7 @@ func printRunsTable(w io.Writer, rows []adminapi.RunView) {
 // share the copy.
 func handleClientErr(stderr io.Writer, err error, socketHint string) int {
 	if errors.Is(err, adminapi.ErrDisabled) {
-		fmt.Fprintf(stderr, "admin API is disabled (%s=off); start slackrun without that setting to use runs/kill.\n", adminapi.SocketEnvVar)
+		fmt.Fprintf(stderr, "admin API is disabled (%s=off); start slackrun without that setting to use admin commands.\n", adminapi.SocketEnvVar)
 		return 3
 	}
 	if errors.Is(err, adminapi.ErrDaemonUnreachable) {
