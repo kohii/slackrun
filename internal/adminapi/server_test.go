@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -49,6 +50,15 @@ func (h *fakeHandle) WasKilled() bool {
 // client bound to it. Socket path is shortened via TMPDIR override so the
 // 104-byte macOS limit never bites in CI.
 func startTestServer(t *testing.T, mgr *runmgr.Manager) *Client {
+	return startTestServerWithRestart(t, mgr, nil, nil)
+}
+
+func startTestServerWithRestart(
+	t *testing.T,
+	mgr *runmgr.Manager,
+	restart RestartPreparer,
+	onRestartPrepared func(),
+) *Client {
 	t.Helper()
 	dir := t.TempDir()
 	// A path like `/var/folders/.../TestAdminAPI_.../slackrun.sock` is
@@ -57,7 +67,12 @@ func startTestServer(t *testing.T, mgr *runmgr.Manager) *Client {
 	sockPath := filepath.Join(dir, "s.sock")
 	t.Setenv(SocketEnvVar, sockPath)
 
-	srv := New(Options{Runs: mgr, Version: "test"})
+	srv := New(Options{
+		Runs:              mgr,
+		Version:           "test",
+		Restart:           restart,
+		OnRestartPrepared: onRestartPrepared,
+	})
 	if err := srv.Start(); err != nil {
 		t.Fatalf("server start: %v", err)
 	}
@@ -75,6 +90,70 @@ func startTestServer(t *testing.T, mgr *runmgr.Manager) *Client {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return NewClient(sockPath)
+}
+
+type fakeRestartPreparer struct {
+	active int
+	ready  bool
+	calls  int
+}
+
+func (f *fakeRestartPreparer) PrepareRestart() (int, bool) {
+	f.calls++
+	return f.active, f.ready
+}
+
+func TestServer_PrepareRestart(t *testing.T) {
+	t.Run("idle", func(t *testing.T) {
+		restart := &fakeRestartPreparer{ready: true}
+		stopped := make(chan struct{}, 1)
+		client := startTestServerWithRestart(t, runmgr.New(), restart, func() { stopped <- struct{}{} })
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		result, err := client.PrepareRestart(ctx, 0)
+		if err != nil {
+			t.Fatalf("PrepareRestart: %v", err)
+		}
+		if !result.Prepared || restart.calls != 1 {
+			t.Fatalf("result = %+v, calls = %d", result, restart.calls)
+		}
+		select {
+		case <-stopped:
+		case <-time.After(time.Second):
+			t.Fatal("restart callback was not called")
+		}
+	})
+
+	t.Run("busy", func(t *testing.T) {
+		restart := &fakeRestartPreparer{active: 2}
+		client := startTestServerWithRestart(t, runmgr.New(), restart, func() {
+			t.Error("restart callback called while busy")
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := client.PrepareRestart(ctx, 0)
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != 409 || apiErr.Code != "dispatches_active" {
+			t.Fatalf("PrepareRestart error = %v", err)
+		}
+	})
+
+	t.Run("mismatch", func(t *testing.T) {
+		restart := &fakeRestartPreparer{ready: true}
+		client := startTestServerWithRestart(t, runmgr.New(), restart, func() {
+			t.Error("restart callback called for a different daemon")
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := client.PrepareRestart(ctx, os.Getpid()+1)
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != 409 || apiErr.Code != "daemon_mismatch" {
+			t.Fatalf("PrepareRestart error = %v", err)
+		}
+		if restart.calls != 0 {
+			t.Fatalf("PrepareRestart called %d time(s)", restart.calls)
+		}
+	})
 }
 
 func TestServer_HealthAndRuns(t *testing.T) {

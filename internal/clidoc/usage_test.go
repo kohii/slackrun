@@ -42,7 +42,7 @@ func TestMainUsage_MentionsExposeSlackToken(t *testing.T) {
 	}
 	// Dispatch section is what `slackrun -h` is primarily about; the
 	// child-side reference is a subsection.
-	for _, want := range []string{"slackrun start", "slackrun check", "slackrun dry-run", "slackrun replay", "slackrun version"} {
+	for _, want := range []string{"slackrun start", "slackrun check", "slackrun dry-run", "slackrun replay", "slackrun prepare-restart", "slackrun version"} {
 		if !strings.Contains(MainUsage, want) {
 			t.Errorf("MainUsage missing dispatch subcommand %q:\n%s", want, MainUsage)
 		}

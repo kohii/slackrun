@@ -113,5 +113,10 @@ func adminServer(app *slackapp.App, version string) slackapp.AdminServer {
 		}
 		return nil
 	}
-	return adminapi.New(adminapi.Options{Runs: app.Runs(), Version: version})
+	return adminapi.New(adminapi.Options{
+		Runs:              app.Runs(),
+		Version:           version,
+		Restart:           app,
+		OnRestartPrepared: app.RequestStop,
+	})
 }

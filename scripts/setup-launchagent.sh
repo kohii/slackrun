@@ -7,6 +7,23 @@
 
 set -euo pipefail
 
+FORCE=false
+if (( $# > 1 )); then
+  echo "usage: $0 [--force]" >&2
+  exit 2
+fi
+case "${1:-}" in
+  "")
+    ;;
+  --force)
+    FORCE=true
+    ;;
+  *)
+    echo "usage: $0 [--force]" >&2
+    exit 2
+    ;;
+esac
+
 LABEL="${SLACKRUN_LABEL:-com.slackrun.slackrun}"
 PLIST_PATH="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 LOG_PATH="${HOME}/Library/Logs/slackrun.log"
@@ -43,6 +60,31 @@ resolve_real() {
   fi
 }
 
+launchd_service_pid() {
+  local output
+  if ! output="$(launchctl print "gui/$(id -u)/${LABEL}" 2>/dev/null)"; then
+    return 1
+  fi
+  awk '$1 == "pid" && $2 == "=" { print $3; exit }' <<<"$output"
+}
+
+wait_for_service_stop() {
+  local old_pid="$1" current_pid attempt
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    current_pid="$(launchd_service_pid || true)"
+    if [[ -z "$current_pid" ]]; then
+      return
+    fi
+    if [[ "$current_pid" != "$old_pid" ]]; then
+      echo "error: ${LABEL} restarted unexpectedly with pid ${current_pid}." >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  echo "error: timed out waiting for ${LABEL} pid ${old_pid} to stop." >&2
+  return 1
+}
+
 # Resolve real paths for anything the rules might invoke (claude, codex, etc.).
 # Add more by editing this list — they all get folded into PATH below.
 BIN_NAMES=(claude codex git node python3)
@@ -66,6 +108,31 @@ for p in "${PATH_PARTS[@]}"; do
   fi
 done
 DEDUP_PATH="${DEDUP_PATH%:}"
+
+service_loaded=false
+service_pid=""
+if service_pid="$(launchd_service_pid)"; then
+  service_loaded=true
+  if [[ -z "$service_pid" && "$FORCE" != true ]]; then
+    echo "error: ${LABEL} is loaded without a running pid; refusing to replace it." >&2
+    echo "  verify the label, or override with: $0 --force" >&2
+    exit 1
+  fi
+  if [[ "$FORCE" == true ]]; then
+    echo "warning: --force skips safe restart preparation; active jobs will be stopped." >&2
+  elif ! "$SLACKRUN_BIN" prepare-restart --pid "$service_pid"; then
+    echo "error: safe restart preparation failed; refusing to replace ${LABEL}." >&2
+    "$SLACKRUN_BIN" runs >&2 || true
+    echo "  retry after active jobs finish, or override with: $0 --force" >&2
+    exit 1
+  else
+    wait_for_service_stop "$service_pid"
+  fi
+elif [[ -e "$PLIST_PATH" && "$FORCE" != true ]]; then
+  echo "error: ${PLIST_PATH} already exists for an unloaded service." >&2
+  echo "  verify the label, or override with: $0 --force" >&2
+  exit 1
+fi
 
 mkdir -p "$(dirname "$PLIST_PATH")"
 
@@ -111,11 +178,10 @@ PLIST
 
 chmod 644 "$PLIST_PATH"
 
-if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
-  launchctl bootout "gui/$(id -u)/${LABEL}" || true
+if [[ "$service_loaded" == true ]]; then
+  launchctl bootout "gui/$(id -u)/${LABEL}"
 fi
 launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
-launchctl kickstart -k "gui/$(id -u)/${LABEL}" || true
 
 echo "Loaded ${LABEL}"
 echo "  plist:  ${PLIST_PATH}"

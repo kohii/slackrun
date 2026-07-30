@@ -172,15 +172,19 @@ slack-app-manifest.yaml
 |---|---|
 | Validate config | `./slackrun check ~/.config/slackrun/rules.yaml` |
 | See which rule matches an event | `./slackrun dry-run <rules.yaml> --event event.json` |
-| Restart after config edit | `launchctl kickstart -k gui/$(id -u)/com.slackrun.slackrun` |
+| Restart after config edit | `./scripts/setup-launchagent.sh` |
 | Tail the log | `tail -f ~/Library/Logs/slackrun.log` |
 | Stop | `launchctl bootout gui/$(id -u)/com.slackrun.slackrun` |
 | List in-flight children | `./slackrun runs` (alias `ps`; `--json` for machine output) |
 | Kill a child | `./slackrun kill <id> [--reason "…"]` |
 | Kill everything | `./slackrun kill --all [--yes]` |
 
-`runs` / `kill` talk to the running `slackrun start` via a per-user UNIX
-socket (`$XDG_RUNTIME_DIR/slackrun/slackrun.sock` on Linux, `$TMPDIR` on
-macOS). Set `SLACKRUN_ADMIN_SOCKET=/path/to/x.sock` to override, or
+The setup script uses `prepare-restart --pid <launchd-pid>` to verify the
+connected daemon, refuse while a dispatch is active, and stop it cleanly before
+replacement.
+
+The admin commands talk to the running `slackrun start` via a per-user UNIX
+socket (`$XDG_RUNTIME_DIR/slackrun/slackrun.sock` on Linux, `$TMPDIR` on macOS).
+Set `SLACKRUN_ADMIN_SOCKET=/path/to/x.sock` to override, or
 `SLACKRUN_ADMIN_SOCKET=off` to disable the admin surface entirely. See
 `docs/security.md` for the trust boundary.

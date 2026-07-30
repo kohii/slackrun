@@ -60,6 +60,7 @@ Admin (talks to a running slackrun start via a per-user UNIX socket):
   slackrun runs [--json]                        List in-flight runs (alias: ps)
   slackrun kill <id...> [--reason "…"]          Send SIGTERM to one or more runs
   slackrun kill --all [--reason "…"] [--yes]    Kill every running child
+  slackrun prepare-restart [--pid PID]          Stop safely if idle
 
 Child-side CLI (available inside a spawned process when the matched rule sets ` + "`expose_slack_token: true`" + ` so SLACK_BOT_TOKEN reaches the child):
 

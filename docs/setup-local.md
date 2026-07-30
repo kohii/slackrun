@@ -54,8 +54,10 @@ an allowed user and watch the logs on stderr.
 ```
 
 The script bakes a deduped PATH into the plist's `EnvironmentVariables` and
-loads the agent. Re-running unloads the previous version first. Override the
-binary path with `SLACKRUN_BIN=/abs/path/to/slackrun ./scripts/setup-launchagent.sh`.
+loads the agent. Re-running first quiesces an idle daemon and refuses if a
+dispatch is active. Use `--force` only when interrupting active work is
+intentional. Override the binary path with
+`SLACKRUN_BIN=/abs/path/to/slackrun ./scripts/setup-launchagent.sh`.
 
 Loaded files:
 
@@ -70,10 +72,10 @@ launchctl print gui/$(id -u)/com.slackrun.slackrun
 tail -f ~/Library/Logs/slackrun.log
 ```
 
-Force-restart after an env change:
+Restart after an env change:
 
 ```sh
-launchctl kickstart -k gui/$(id -u)/com.slackrun.slackrun
+./scripts/setup-launchagent.sh
 ```
 
 Stop:
