@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -42,14 +43,17 @@ const replayUsage = `usage: slackrun replay <rules.yaml> --permalink <URL> [flag
 Fetches a specific Slack message via the API, runs it through the same
 rule-matching pipeline slackrun uses in the daemon, and (unless --dry-stdin)
 spawns the matched rule's command locally. Nothing is posted to Slack by
-slackrun itself; the three safety flags (--allow-slack-side-effects,
---expose-token, --real-slack-context) are opt-in for stronger fidelity.
+slackrun itself; --real-slack-context and --expose-token opt into the fidelity
+that lets the child write.
 
 Flags:
   --permalink <URL>            Slack permalink of the message to replay
   --channel <C…> --ts <TS>     alternative to --permalink
   --message-ts <TS>            when a thread permalink is ambiguous, force
                                which message in the thread is the trigger
+  --as message|app_mention     force the event type; by default a message that
+                               mentions the bot replays as app_mention, the way
+                               Slack delivered it
   --rule <name>                restrict matching to a single rule
   --allowed-user-ids <U…,U…>   overrides rules.yaml top-level allowed_user_ids
   --timeout <ms>               override the matched rule's timeout_ms
@@ -58,11 +62,10 @@ Flags:
   --print-event                print the constructed IncomingEvent as JSON
                                before matching (debug aid)
   --json                       emit report / errors on stdout as JSON
-  --allow-slack-side-effects   let the child post via slackrun subcommands
-                               (implied by --real-slack-context+--expose-token)
   --real-slack-context         pass the real SLACKRUN_CHANNEL / TS / THREAD_TS
                                to the child (otherwise dummy values)
-  --expose-token               forward SLACK_BOT_TOKEN to the child; requires
+  --expose-token               forward SLACK_BOT_TOKEN to the child when the
+                               matched rule sets expose_slack_token; requires
                                --real-slack-context (dummy ctx + real token
                                would send child writes to unpredictable places)
 `
@@ -82,15 +85,15 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 	channelFlag := fs.String("channel", "", "channel ID (with --ts, alternative to --permalink)")
 	tsFlag := fs.String("ts", "", "message ts (with --channel, alternative to --permalink)")
 	messageTSFlag := fs.String("message-ts", "", "when a thread permalink is ambiguous, force the trigger's ts")
+	asFlag := fs.String("as", "", "force the event type: message | app_mention")
 	ruleFlag := fs.String("rule", "", "restrict matching to a single named rule")
 	allowedFlag := fs.String("allowed-user-ids", "", "override rules.yaml top-level allowed_user_ids (comma-separated)")
 	timeoutFlag := fs.Int("timeout", 0, "override the matched rule's timeout_ms (0 = use rule value)")
 	dryStdin := fs.Bool("dry-stdin", false, "print rendered stdin + env and exit without spawning")
 	printEvent := fs.Bool("print-event", false, "print the constructed IncomingEvent as JSON")
 	jsonOut := fs.Bool("json", false, "emit the report as JSON on stdout")
-	allowSlack := fs.Bool("allow-slack-side-effects", false, "authorize the child to post via slackrun subcommands")
 	realCtx := fs.Bool("real-slack-context", false, "pass real SLACKRUN_* env to the child")
-	exposeToken := fs.Bool("expose-token", false, "forward SLACK_BOT_TOKEN to the child (requires --real-slack-context)")
+	exposeTokenFlag := fs.Bool("expose-token", false, "forward SLACK_BOT_TOKEN to the child when its rule opts in (requires --real-slack-context)")
 
 	if err := fs.Parse(args[1:]); err != nil {
 		return replayExitUsage
@@ -100,8 +103,12 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "either --permalink or both --channel and --ts are required")
 		return replayExitUsage
 	}
-	if *exposeToken && !*realCtx {
+	if *exposeTokenFlag && !*realCtx {
 		fmt.Fprintln(stderr, "--expose-token requires --real-slack-context (dummy ctx + real token is unsafe)")
+		return replayExitUsage
+	}
+	if *asFlag != "" && *asFlag != eventTypeMessage && *asFlag != eventTypeAppMention {
+		fmt.Fprintf(stderr, "--as must be %s or %s, got %q\n", eventTypeMessage, eventTypeAppMention, *asFlag)
 		return replayExitUsage
 	}
 
@@ -148,12 +155,21 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 	}
 	client := slack.New(tok, slack.OptionHTTPClient(httpClient()))
 
+	// The daemon learns its own identity from auth.test at startup. Matching,
+	// thread rendering and the event type below all depend on it.
+	self, err := client.AuthTest()
+	if err != nil {
+		fmt.Fprintln(stderr, "auth.test:", err)
+		return replayExitFetchFail
+	}
+
 	msg, err := fetchMessage(client, channel, ts, threadTS)
 	if err != nil {
 		fmt.Fprintln(stderr, "fetch message:", err)
 		return replayExitFetchFail
 	}
 	ev := slackapp.IncomingEventFromMessage(msg, channel)
+	ev.Type = eventType(*asFlag, ev, self.UserID)
 
 	if *printEvent {
 		enc := json.NewEncoder(stderr)
@@ -166,6 +182,8 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		allowedIDs = splitCSV(*allowedFlag)
 	}
 	res := dispatch.Match(ev, rules, dispatch.MatcherContext{
+		SelfUserID:     self.UserID,
+		SelfBotID:      self.BotID,
 		AllowedUserIDs: allowedIDs,
 	})
 	if res.Kind != dispatch.MatchKindMatched {
@@ -181,15 +199,21 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 	// Optionally fetch the thread if the rule needs it.
 	var thread []slackthread.Message
 	if needsThreadFetch(rule.Action.Stdin) {
-		parentTS := ev.ThreadTS
-		if parentTS == "" {
-			parentTS = ev.TS
-		}
-		thread, err = fetchThread(client, channel, parentTS)
-		if err != nil {
-			fmt.Fprintln(stderr, "fetch thread:", err)
+		// Generous deadline compared to the daemon's: there is no event loop
+		// waiting behind this one fetch.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		fetched, ferr := slackthread.Fetch(ctx, client, slackthread.FetchOptions{
+			Channel:    channel,
+			ThreadTS:   firstNonEmpty(ev.ThreadTS, ev.TS),
+			SelfUserID: self.UserID,
+			SelfBotID:  self.BotID,
+		})
+		cancel()
+		if ferr != nil {
+			fmt.Fprintln(stderr, "fetch thread:", ferr)
 			return replayExitFetchFail
 		}
+		thread = fetched.Messages
 	}
 
 	permalink := ""
@@ -216,6 +240,8 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		Match:                 res,
 		Thread:                thread,
 		Nonce:                 "REPLAYNC",
+		SelfUserID:            self.UserID,
+		SelfBotID:             self.BotID,
 		TriggerMessageTrusted: slackapp.TriggerMessageTrusted(rule.Trigger, allowedIDs),
 	})
 
@@ -241,10 +267,18 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		timeout = time.Duration(*timeoutFlag) * time.Millisecond
 	}
 
+	// The token is the child's licence to write to Slack, and under the daemon
+	// only a rule that asks for it gets one. --expose-token lifts the CLI's own
+	// safety default; it does not overrule the rule.
+	exposeToken := *exposeTokenFlag && rule.Action.ExposeSlackToken
+	if *exposeTokenFlag && !exposeToken {
+		fmt.Fprintf(stderr, "note: rule %s does not set expose_slack_token; running the child without a token\n", rule.Name)
+	}
+
 	// One-line banner so an operator can't miss what's about to happen.
-	fmt.Fprintf(stderr, "replay: rule=%s cmd=%v slack-writes=%s token=%s ctx=%s\n",
-		rule.Name, rule.Action.Command,
-		onOff(*allowSlack), onOff(*exposeToken), ctxLabel(*realCtx))
+	fmt.Fprintf(stderr, "replay: rule=%s as=%s cmd=%v token=%s ctx=%s\n",
+		rule.Name, ev.Type, rule.Action.Command,
+		onOff(exposeToken), ctxLabel(*realCtx))
 
 	if *dryStdin {
 		fmt.Fprintln(stdout, "--- STDIN (bytes:", len(stdinPayload), ") ---")
@@ -273,7 +307,7 @@ func RunReplay(args []string, stdout, stderr io.Writer) int {
 		Command:          rule.Action.Command,
 		Cwd:              rule.Action.Cwd,
 		Env:              childEnv,
-		ExposeSlackToken: *exposeToken,
+		ExposeSlackToken: exposeToken,
 		Timeout:          timeout,
 		Stdin:            strings.NewReader(stdinPayload),
 		Stdout:           stdout,
@@ -387,30 +421,36 @@ func fetchMessage(client *slack.Client, channel, ts, threadTS string) (slack.Mes
 	return hist.Messages[0], nil
 }
 
-// fetchThread pulls the whole thread as slackthread.Message values, matching
-// what the daemon builds from a thread part.
-func fetchThread(client *slack.Client, channel, parentTS string) ([]slackthread.Message, error) {
-	msgs, _, _, err := client.GetConversationReplies(&slack.GetConversationRepliesParameters{
-		ChannelID: channel,
-		Timestamp: parentTS,
-		Limit:     200,
-	})
-	if err != nil {
-		return nil, err
+// Event types the matcher understands. conversations.history / .replies do not
+// carry the type the daemon's event stream saw.
+const (
+	eventTypeMessage    = "message"
+	eventTypeAppMention = "app_mention"
+)
+
+// eventType decides which of the two a fetched message replays as. It matters
+// because matching is type-strict: a `message` event never reaches an
+// `app_mention` rule, and vice versa.
+//
+// Slack delivers a person's message that mentions the bot as an app_mention, so
+// the mention in the text is the signal. Bot-authored records stay `message`
+// even when they mention the bot — that is what the daemon sees for them, and
+// mention rules would reject them as unauthorized anyway.
+//
+// `override` (from --as) wins when set; callers validate it before getting here.
+func eventType(override string, ev dispatch.IncomingEvent, selfUserID string) string {
+	if override != "" {
+		return override
 	}
-	out := make([]slackthread.Message, 0, len(msgs))
-	for _, m := range msgs {
-		tm := slackthread.Message{TS: m.Timestamp, Text: m.Text}
-		for _, f := range m.Files {
-			url := f.URLPrivateDownload
-			if url == "" {
-				url = f.URLPrivate
-			}
-			tm.Files = append(tm.Files, slackthread.File{Name: f.Name, URL: url})
-		}
-		out = append(out, tm)
+	if ev.User == "" || ev.BotID != "" {
+		return eventTypeMessage
 	}
-	return out, nil
+	text := dispatch.ExtractText(ev)
+	if selfUserID != "" && (strings.Contains(text, "<@"+selfUserID+">") ||
+		strings.Contains(text, "<@"+selfUserID+"|")) {
+		return eventTypeAppMention
+	}
+	return eventTypeMessage
 }
 
 func needsThreadFetch(parts []config.StdinPart) bool {

@@ -475,6 +475,10 @@ slackrun replay ~/.config/slackrun/rules.yaml \
   --permalink https://<workspace>.slack.com/archives/CXXX/pTTTTTTTTTTTTT
 ```
 
+The API does not report which event type the daemon saw, so a message that
+mentions the bot replays as `app_mention` and everything else as `message`.
+`--as message|app_mention` forces one when that guess is wrong.
+
 Safety defaults: `SLACKRUN_*` env is dummy, `SLACK_BOT_TOKEN` is stripped
 from the child, and the parent posts no progress / done messages. Opt in
 per layer as fidelity increases:
@@ -482,8 +486,8 @@ per layer as fidelity increases:
 - `--dry-stdin` — skip spawn, just print rendered stdin + env
 - (default) — spawn but keep the child sandboxed from Slack writes
 - `--real-slack-context` — child sees the real channel / ts
-- `--expose-token` — child gets `SLACK_BOT_TOKEN` (requires `--real-slack-context`)
-- `--allow-slack-side-effects` — parent behaves like the daemon (progress msg, ✅Done, react)
+- `--expose-token` — child gets `SLACK_BOT_TOKEN`, but only if its own rule sets
+  `expose_slack_token` (requires `--real-slack-context`)
 
 Exit codes: `0` child success, `1` child failure or internal error, `2`
 usage, `3` no rule matched, `4` message fetch failed.
