@@ -184,7 +184,7 @@ type fakeUserClient struct {
 	got  string
 }
 
-func (f *fakeUserClient) GetUserInfo(user string) (*slack.User, error) {
+func (f *fakeUserClient) GetUserInfo(user string, _ ...slack.GetUserInfoOption) (*slack.User, error) {
 	f.got = user
 	return f.user, f.err
 }
