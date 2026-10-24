@@ -11,7 +11,7 @@ import (
 
 // UserClient is the subset of *slack.Client RunUser needs.
 type UserClient interface {
-	GetUserInfo(user string) (*slack.User, error)
+	GetUserInfo(user string, options ...slack.GetUserInfoOption) (*slack.User, error)
 	GetUserByEmail(email string) (*slack.User, error)
 }
 

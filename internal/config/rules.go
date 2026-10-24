@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/kohii/slackrun/internal/runner"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // TriggerType is one of the two recognised event sources slackrun routes on.

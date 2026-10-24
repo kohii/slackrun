@@ -1,6 +1,6 @@
 # Setup: local runtime
 
-macOS only. Assumes Go 1.25+ to build (see `go.mod`) and at least one of the
+macOS only. Assumes Go 1.27.3+ to build (see `go.mod`) and at least one of the
 programs your rules reference already installed in PATH.
 
 ## 1. Build
